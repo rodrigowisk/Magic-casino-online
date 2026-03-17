@@ -1,0 +1,122 @@
+services:
+  # ✅ FRONTEND VUE.JS
+  frontend:
+    build:
+      context: ./Frontend-casino
+      dockerfile: Dockerfile
+    container_name: magic_frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./Frontend-casino:/app
+      - /app/node_modules
+    networks:
+      - magic_network
+
+  # ✅ BANCO EM MEMÓRIA (Redis)
+  redis:
+    image: redis:7-alpine
+    container_name: magic_redis
+    ports:
+      - "6380:6379"
+    restart: unless-stopped
+    networks:
+      - magic_network
+
+  # ✅ MENSAGERIA (RabbitMQ)
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: magic_rabbitmq
+    ports:
+      - "5672:5672"   # Porta de comunicação dos microsserviços
+      - "15672:15672" # Porta do painel de administração web
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASS}"
+    restart: unless-stopped
+    networks:
+      - magic_network
+
+  # ✅ MICROSSERVIÇO DE IDENTIDADE (.NET)
+  identity:
+    build:
+      context: .
+      dockerfile: Backend.Identity/Dockerfile
+    container_name: magic_identity
+    env_file:
+      - .env
+    environment:
+      ConnectionStrings__DefaultConnection: "${DB_CONN_IDENTITY}"
+      ConnectionStrings__Redis: "${REDIS_CONNECTION_STRING}"
+      Jwt__Key: "${JWT_SECRET}"
+      Jwt__Issuer: "${JWT_ISSUER}"
+      Jwt__Audience: "${JWT_AUDIENCE}"
+      ASPNETCORE_ENVIRONMENT: "Development"
+      InternalApiKey: "${INTERNAL_API_KEY}"
+    ports:
+      - "5001:8080"
+    restart: always
+    depends_on:
+      - redis
+    networks:
+      - magic_network
+
+  # ✅ MICROSSERVIÇO DE JOGOS E MESAS - MEINHO (.NET)
+  game:
+    build:
+      context: .
+      dockerfile: Backend.Game/Dockerfile
+    container_name: magic_game
+    env_file:
+      - .env
+    environment:
+      ConnectionStrings__DefaultConnection: "${DB_CONN_GAME}"
+      RabbitMq__Host: "${RABBITMQ_HOST}"
+      RabbitMq__Username: "${RABBITMQ_USER}"
+      RabbitMq__Password: "${RABBITMQ_PASS}"
+      Jwt__Key: "${JWT_SECRET}"
+      Jwt__Issuer: "${JWT_ISSUER}"
+      Jwt__Audience: "${JWT_AUDIENCE}"
+      ASPNETCORE_ENVIRONMENT: "Development"
+      IdentityApiUrl: "http://magic_identity:8080"
+      InternalApiKey: "${INTERNAL_API_KEY}"
+    ports:
+      - "5002:8080"
+    restart: always
+    depends_on:
+      - identity
+      - rabbitmq
+    networks:
+      - magic_network
+
+  # ✅ NOVO MICROSSERVIÇO DE JOGOS E MESAS - CACHETA (.NET)
+  cacheta:
+    build:
+      context: .
+      dockerfile: Backend.Cacheta/Dockerfile
+    container_name: magic_cacheta
+    env_file:
+      - .env
+    environment:
+      ConnectionStrings__DefaultConnection: "${DB_CONN_GAME}"
+      RabbitMq__Host: "${RABBITMQ_HOST}"
+      RabbitMq__Username: "${RABBITMQ_USER}"
+      RabbitMq__Password: "${RABBITMQ_PASS}"
+      Jwt__Key: "${JWT_SECRET}"
+      Jwt__Issuer: "${JWT_ISSUER}"
+      Jwt__Audience: "${JWT_AUDIENCE}"
+      ASPNETCORE_ENVIRONMENT: "Development"
+      IdentityApiUrl: "http://magic_identity:8080"
+      InternalApiKey: "${INTERNAL_API_KEY}"
+    ports:
+      - "5003:8080" # Nova porta exclusiva para a API da Cacheta
+    restart: always
+    depends_on:
+      - identity
+      - rabbitmq
+    networks:
+      - magic_network
+
+networks:
+  magic_network:
+    driver: bridge

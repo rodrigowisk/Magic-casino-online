@@ -1,0 +1,9 @@
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\bin\Debug\net8.0\Backend.Identity.exe
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\Backend.Identity.csproj.AssemblyReference.cache
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\rpswa.dswa.cache.json
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\Backend.Identity.GeneratedMSBuildEditorConfig.editorconfig
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\Backend.Identity.AssemblyInfoInputs.cache
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\Backend.Identity.AssemblyInfo.cs
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\Backend.Identity.csproj.CoreCompileInputs.cache
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\Backend.Identity.MvcApplicationPartsAssemblyInfo.cs
+\\wsl.localhost\Ubuntu\home\rodrigo\projetos\Magic-casino\Backend.Identity\obj\Debug\net8.0\Backend.Identity.MvcApplicationPartsAssemblyInfo.cache
