@@ -2,6 +2,9 @@ import * as PIXI from 'pixi.js';
 import { Deck } from '../Deck';
 import { PlayerSeat } from '../PlayerSeat';
 import { Animator } from '../Animator';
+import { MeinhoHelper } from './MeinhoHelper';
+import { MeinhoBoardUI } from './MeinhoBoardUI';
+import { MeinhoAnimator } from './MeinhoAnimator';
 
 export interface EngineCallbacks {
     setDealing: (val: boolean) => void;
@@ -13,14 +16,10 @@ export interface EngineCallbacks {
 export class MeinhoPixiEngine {
     public app: PIXI.Application | null = null;
     public deckInstance: Deck | null = null;
-    public potTextUI: PIXI.Text | null = null;
-    public tableInfoTextUI: PIXI.Text | null = null;
+    public boardUI: MeinhoBoardUI | null = null;
     
     public singleChipTexture: PIXI.Texture | null = null;
     public potChipsTexture: PIXI.Texture | null = null;
-    public potStackSprite: PIXI.Sprite | null = null;
-    
-    // 👇 NOVO: Cache de texturas de avatares para evitar recarregamento
     private avatarTextureCache: Map<string, PIXI.Texture> = new Map();
 
     public backgroundLayer = new PIXI.Container();
@@ -32,9 +31,7 @@ export class MeinhoPixiEngine {
     public potChipsUI: PIXI.Container[] = []; 
     public playerSeats: PlayerSeat[] = [];
     
-    // Guarda as coordenadas fixas da cadeira independentemente do estado do Vue
     public seatCoords: { x: number, y: number }[] = [];
-    
     public activeFireParticles: { mesh: PIXI.Graphics; life: number; vx: number; vy: number; }[] = [];
 
     public heroPixiCards: PIXI.Container[] = [];
@@ -49,28 +46,42 @@ export class MeinhoPixiEngine {
     public readonly POT_Y = 320;
 
     public readonly MAGIC_COLORS = [0x00f3ff, 0xa855f7, 0xff6bfb, 0xffffff];
-    
     public peekMode: boolean = false;
 
-    constructor(
-        public gameState: any, 
-        public callbacks: EngineCallbacks
-    ) {}
+    // --- SISTEMA DE ÁUDIO ---
+    public somCarta: HTMLAudioElement | null = null;
+    public somSentar: HTMLAudioElement | null = null;
+    public somLevantar: HTMLAudioElement | null = null; 
+    public somChip: HTMLAudioElement | null = null;
+    public somChips: HTMLAudioElement | null = null;
+    public somVitoria: HTMLAudioElement | null = null; 
+    public somDerrota: HTMLAudioElement | null = null; 
+    public somPular: HTMLAudioElement | null = null; 
+    public somTimer: HTMLAudioElement | null = null; 
+    public somAlarm: HTMLAudioElement | null = null; 
+    private ultimoBlocoTempo: number = -1; 
+
+    constructor(public gameState: any, public callbacks: EngineCallbacks) {}
+
+    public tocarSom(audio: HTMLAudioElement | null) {
+        if (audio) {
+            audio.currentTime = 0;
+            audio.play().catch(e => console.warn('Áudio bloqueado pelo navegador:', e));
+        }
+    }
+
+    public pararSom(audio: HTMLAudioElement | null) {
+        if (audio && !audio.paused) {
+            audio.pause();
+            audio.currentTime = 0;
+        }
+    }
 
     public setPeekMode(enabled: boolean) {
         this.peekMode = enabled;
     }
 
-    public async init(
-        canvasContainer: HTMLElement, 
-        width: number, 
-        height: number, 
-        defaultAvatarImg: string, // 👇 Agora recebe o default daqui
-        deckImg: string, 
-        singleChipImg: string,
-        tableImg: string,
-        potChipsImg: string
-    ) {
+    public async init(canvasContainer: HTMLElement, width: number, height: number, defaultAvatarImg: string, deckImg: string, singleChipImg: string, tableImg: string, potChipsImg: string) {
         this.app = new PIXI.Application();
         
         await this.app.init({ 
@@ -91,9 +102,24 @@ export class MeinhoPixiEngine {
 
         canvasContainer.appendChild(this.app.canvas);
 
-        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-        if (isMobile) {
+        if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
             this.app.ticker.maxFPS = 50; 
+        }
+
+        // CARREGANDO ÁUDIOS
+        try {
+            this.somCarta = new Audio('/sons/1card.wav');
+            this.somSentar = new Audio('/sons/rayseat.wav'); 
+            this.somLevantar = new Audio('/sons/down.wav');  
+            this.somChip = new Audio('/sons/chip.wav');      
+            this.somChips = new Audio('/sons/chips.wav');    
+            this.somVitoria = new Audio('/sons/victory.wav'); 
+            this.somDerrota = new Audio('/sons/lose.mp3'); 
+            this.somPular = new Audio('/sons/pular.mp3');
+            this.somTimer = new Audio('/sons/timer.mp3');
+            this.somAlarm = new Audio('/sons/alarm.mp3');
+        } catch (e) {
+            console.warn("Aviso: Falha ao carregar arquivos de áudio", e);
         }
 
         let tableTexture, deckTexture;
@@ -104,99 +130,19 @@ export class MeinhoPixiEngine {
             this.singleChipTexture = await PIXI.Assets.load(singleChipImg);
             this.potChipsTexture = await PIXI.Assets.load(potChipsImg);
             
-            // 👇 Carrega o default avatar e salva no cache
             const defaultTex = await PIXI.Assets.load(defaultAvatarImg);
             this.avatarTextureCache.set(defaultAvatarImg, defaultTex);
-            this.avatarTextureCache.set('default', defaultTex); // Alias seguro
-
+            this.avatarTextureCache.set('default', defaultTex); 
         } catch (e) {
-            console.error("ERRO: Falha nas imagens do PixiJS", e);
-            tableTexture = PIXI.Texture.EMPTY;
-            deckTexture = PIXI.Texture.EMPTY;
-            this.singleChipTexture = PIXI.Texture.EMPTY;
-            this.potChipsTexture = PIXI.Texture.EMPTY;
-            this.avatarTextureCache.set('default', PIXI.Texture.EMPTY);
+            tableTexture = PIXI.Texture.EMPTY; deckTexture = PIXI.Texture.EMPTY; this.singleChipTexture = PIXI.Texture.EMPTY; this.potChipsTexture = PIXI.Texture.EMPTY; this.avatarTextureCache.set('default', PIXI.Texture.EMPTY);
         }
 
-        const tableSprite = new PIXI.Sprite(tableTexture);
-        tableSprite.anchor.set(0.5); 
-        
-        let scale = Math.min(width / (tableTexture.width || width), height / (tableTexture.height || height));
-        const margemFator = 1.3; 
-        tableSprite.scale.set(scale * margemFator);
-        
-        tableSprite.x = width / 2;
-        tableSprite.y = height / 2.1;
-        
-        const neonGlow = new PIXI.Graphics();
-        neonGlow.ellipse(0, 0, tableSprite.width * 0.48, tableSprite.height * 0.42);
-        neonGlow.fill({ color: 0x00f3ff, alpha: 0.8 }); 
-        
-        const blurFilter = new PIXI.BlurFilter();
-        blurFilter.blur = 60; 
-        neonGlow.filters = [blurFilter];
-        
-        neonGlow.x = tableSprite.x;
-        neonGlow.y = tableSprite.y;
-        
-        this.backgroundLayer.addChild(neonGlow); 
-        this.backgroundLayer.addChild(tableSprite); 
-
-        this.tableInfoTextUI = new PIXI.Text({
-            text: `JOGO: MEINHO\nMESA: ${(this.gameState.tableName || 'CARREGANDO...').toUpperCase()}\nBUY-IN: R$ ${this.gameState.tableMinBuyIn}\nANTE: R$ ${this.gameState.minBet}`,
-            style: {
-                fontFamily: 'Montserrat, Arial, sans-serif', 
-                fontSize: 13, 
-                fill: 0xffffff, 
-                align: 'center',
-                fontWeight: '800',
-                letterSpacing: 2, 
-                lineHeight: 22 
-            }
-        } as any);
-        this.tableInfoTextUI.anchor.set(0.5);
-        this.tableInfoTextUI.x = this.POT_X;
-        this.tableInfoTextUI.y = 580; 
-        this.tableInfoTextUI.alpha = 0.25; 
-        
-        this.backgroundLayer.addChild(this.tableInfoTextUI);
-
-        this.potStackSprite = new PIXI.Sprite(this.potChipsTexture || PIXI.Texture.EMPTY);
-        this.potStackSprite.anchor.set(0.5);
-        this.potStackSprite.width = 65; 
-        this.potStackSprite.height = 65;
-        this.potStackSprite.x = this.POT_X - 35; 
-        this.potStackSprite.y = this.POT_Y; 
-        this.potStackSprite.visible = this.gameState.pot > 0;
-        this.mainLayer.addChild(this.potStackSprite);
-
-        this.potTextUI = new PIXI.Text({
-            text: `Pote\n${this.gameState.pot}`,
-            style: {
-                fontFamily: 'Arial', 
-                fontSize: 16, 
-                fill: 0x00f3ff, 
-                fontWeight: 'bold',
-                align: 'center', 
-                dropShadow: true, 
-                dropShadowColor: '#00f3ff', 
-                dropShadowDistance: 0, 
-                dropShadowBlur: 8 
-            }
-        } as any);
-        this.potTextUI.anchor.set(0.5);
-        this.potTextUI.x = this.POT_X + 25; 
-        this.potTextUI.y = this.POT_Y; 
-        
-        this.potTextUI.visible = this.gameState.pot > 0;
-        this.mainLayer.addChild(this.potTextUI);
+        this.boardUI = new MeinhoBoardUI(width, height, this.backgroundLayer, this.mainLayer, this.gameState, tableTexture, this.potChipsTexture, this.POT_X, this.POT_Y);
         
         this.app.ticker.add(() => this.updateFramePixi());
 
         this.cardTargets.length = 0; 
-
-        const numSeats = this.gameState.maxPlayers;
-        this.buildSeats(numSeats);
+        this.buildSeats(this.gameState.maxPlayers);
 
         this.deckInstance = new Deck(265, 420, deckTexture, true); 
         this.mainLayer.addChild(this.deckInstance.view);
@@ -205,20 +151,15 @@ export class MeinhoPixiEngine {
         this.updateAllBalances();
     }
     
-    // 👇 NOVO MÉTODO AUXILIAR: Pega a textura do avatar sob demanda
     private getAvatarTexture(url?: string): PIXI.Texture {
         if (!url) return this.avatarTextureCache.get('default') || PIXI.Texture.EMPTY;
-        
-        if (this.avatarTextureCache.has(url)) {
-            return this.avatarTextureCache.get(url)!;
-        }
+        if (this.avatarTextureCache.has(url)) return this.avatarTextureCache.get(url)!;
 
         try {
             const texture = PIXI.Texture.from(url);
             this.avatarTextureCache.set(url, texture);
             return texture;
         } catch (e) {
-            console.error("Erro ao carregar textura do avatar:", url, e);
             return this.avatarTextureCache.get('default') || PIXI.Texture.EMPTY;
         }
     }
@@ -234,54 +175,16 @@ export class MeinhoPixiEngine {
         this.seatCoords = []; 
 
         for (let i = 0; i < numSeats; i++) {
-            let avatarX = 0, avatarY = 0, cx = 0, cy = 0;
-
-            if (numSeats === 2) {
-                if (i === 0) { avatarX = 220; avatarY = 738; cx = avatarX + 60; cy = avatarY - 10; } 
-                else if (i === 1) { avatarX = 212; avatarY = 93; cx = avatarX + 50; cy = avatarY; }  
-            }
-            else if (numSeats === 3) {
-                if (i === 0) { avatarX = 220; avatarY = 738; cx = avatarX + 60; cy = avatarY - 10; } 
-                else if (i === 1) { avatarX = 46; avatarY = 385; cx = avatarX + 49; cy = avatarY; }  
-                else if (i === 2) { avatarX = 372; avatarY = 385; cx = avatarX - 45; cy = avatarY; } 
-            }
-            else if (numSeats === 4) {
-                if (i === 0) { avatarX = 220; avatarY = 738; cx = avatarX + 60; cy = avatarY - 10; } 
-                else if (i === 1) { avatarX = 46; avatarY = 385; cx = avatarX + 49; cy = avatarY; }  
-                else if (i === 2) { avatarX = 212; avatarY = 93; cx = avatarX + 50; cy = avatarY; }  
-                else if (i === 3) { avatarX = 372; avatarY = 385; cx = avatarX - 45; cy = avatarY; } 
-            }
-            else if (numSeats === 5) {
-                if (i === 0) { avatarX = 220; avatarY = 738; cx = avatarX + 60; cy = avatarY - 10; } 
-                else if (i === 1) { avatarX = 45; avatarY = 530; cx = avatarX + 49; cy = avatarY; } 
-                else if (i === 2) { avatarX = 47; avatarY = 240; cx = avatarX + 49; cy = avatarY; } 
-                else if (i === 3) { avatarX = 372; avatarY = 240; cx = avatarX - 45; cy = avatarY; } 
-                else if (i === 4) { avatarX = 372; avatarY = 530; cx = avatarX - 45; cy = avatarY; }
-            }
-            else {
-                if (i === 0) { avatarX = 220; avatarY = 738; cx = avatarX + 60; cy = avatarY - 10; } 
-                else if (i === 1) { avatarX = 45; avatarY = 530; cx = avatarX + 49; cy = avatarY; } 
-                else if (i === 2) { avatarX = 47; avatarY = 240; cx = avatarX + 49; cy = avatarY; } 
-                else if (i === 3) { avatarX = 212; avatarY = 93; cx = avatarX + 50; cy = avatarY; } 
-                else if (i === 4) { avatarX = 372; avatarY = 240; cx = avatarX - 45; cy = avatarY; } 
-                else if (i === 5) { avatarX = 372; avatarY = 530; cx = avatarX - 45; cy = avatarY; }
-            }
-
-            this.seatCoords[i] = { x: avatarX, y: avatarY };
+            const coords = MeinhoHelper.getSeatCoords(numSeats, i);
+            this.seatCoords[i] = { x: coords.avatarX, y: coords.avatarY };
 
             const player = this.gameState.players[i] || { name: 'Livre', chips: 0, isSeated: false };
             
-            this.cardTargets.push({ x: cx, y: cy, seat: i, isLeft: true });
-            this.cardTargets.push({ x: cx, y: cy, seat: i, isLeft: false });
+            this.cardTargets.push({ x: coords.cx, y: coords.cy, seat: i, isLeft: true });
+            this.cardTargets.push({ x: coords.cx, y: coords.cy, seat: i, isLeft: false });
 
             const seatUi = new PlayerSeat(
-                avatarX, 
-                avatarY, 
-                this.getAvatarTexture(), // Inicia com o padrão
-                player.name, 
-                player.chips, 
-                player.isSeated, 
-                () => this.callbacks.sitDown(i)
+                coords.avatarX, coords.avatarY, this.getAvatarTexture(), player.name, player.chips, player.isSeated, () => this.callbacks.sitDown(i)
             );
             this.mainLayer.addChild(seatUi.container);
             this.playerSeats.push(seatUi);
@@ -291,11 +194,8 @@ export class MeinhoPixiEngine {
     public updateDeckVisibility() {
         if (this.deckInstance && this.gameState && this.gameState.players) {
             const seatedCount = this.gameState.players.filter((p: any) => p.isSeated).length;
-            
-            // Verifica se a mão ainda está rolando (dealing, betting, ou resolving)
             const isGameActive = this.gameState.phase !== 'waiting';
             
-            // 👇 SE ESTIVER DESCARTANDO **OU** O JOGO AINDA ESTIVER ATIVO, MANTÉM O BARALHO
             if (this.isDiscardingCards || isGameActive) {
                 this.deckInstance.view.visible = true;
             } else {
@@ -305,90 +205,29 @@ export class MeinhoPixiEngine {
     }
 
     public updatePotText(newPot: number) {
-        if (this.potTextUI) {
-            this.potTextUI.text = `Pote\n${newPot}`; 
-            this.potTextUI.visible = newPot > 0;
-        }
-
-        if (this.potStackSprite) {
-            this.potStackSprite.visible = newPot > 0;
-            
-            if (newPot > 0) {
-                const originalScaleX = Math.sign(this.potStackSprite.scale.x) * (65 / (this.potChipsTexture?.width || 65));
-                const originalScaleY = Math.sign(this.potStackSprite.scale.y) * (65 / (this.potChipsTexture?.height || 65));
-                
-                this.potStackSprite.scale.set(originalScaleX * 1.3, originalScaleY * 1.3);
-                setTimeout(() => {
-                    if (this.potStackSprite && !this.potStackSprite.destroyed) {
-                        this.potStackSprite.scale.set(originalScaleX, originalScaleY);
-                    }
-                }, 150);
-            }
+        if (this.boardUI) {
+            this.boardUI.updateTexts(this.gameState.tableName, this.gameState.tableMinBuyIn, this.gameState.minBet, newPot);
+            this.boardUI.animatePotIncrease(newPot);
         }
     }
 
-    private playChipHitPotAnimation() {
-        if (this.potStackSprite && !this.potStackSprite.destroyed) {
-            this.potStackSprite.width = 85; 
-            this.potStackSprite.height = 85; 
-            
-            setTimeout(() => {
-                if (this.potStackSprite && !this.potStackSprite.destroyed) {
-                    this.potStackSprite.width = 65; 
-                    this.potStackSprite.height = 65; 
-                }
-            }, 120);
-        }
-
-        for (let i = 0; i < 15; i++) {
-            const p = new PIXI.Graphics();
-            const size = Math.random() * 3 + 2;
-            p.circle(0, 0, size);
-            p.fill({ color: 0xFFD700, alpha: 1 }); 
-            p.x = this.POT_X - 35; 
-            p.y = this.POT_Y; 
-            
-            this.particleLayer.addChild(p);
-            
-            const angle = Math.random() * Math.PI * 2;
-            const speed = Math.random() * 5 + 2;
-            
-            this.activeFireParticles.push({
-                mesh: p,
-                life: 1.0,
-                vx: Math.cos(angle) * speed,
-                vy: Math.sin(angle) * speed
-            });
-        }
-    }
-
-public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chips: number, status: string, avatarUrl?: string) {
+    public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chips: number, status: string, avatarUrl?: string) {
         const seatUi = this.playerSeats[seatIndex];
         if (seatUi) {
             seatUi.setSeated(isSeated);
             seatUi.updatePlayerInfo(name, chips);
             
-            // 👇 CORREÇÃO: Usando PIXI.Assets.load() para forçar o download da imagem
             if (avatarUrl) {
-                // Se já baixou essa foto antes, usa do cache na hora
                 if (this.avatarTextureCache.has(avatarUrl)) {
                     const cachedTex = this.avatarTextureCache.get(avatarUrl)!;
-                    if (typeof (seatUi as any).setAvatarTexture === 'function') {
-                        (seatUi as any).setAvatarTexture(cachedTex);
-                    }
+                    if (typeof (seatUi as any).setAvatarTexture === 'function') (seatUi as any).setAvatarTexture(cachedTex);
                 } else {
-                    // Coloca a foto default temporariamente enquanto carrega a nova
                     const defaultTex = this.avatarTextureCache.get('default');
-                    if (defaultTex && typeof (seatUi as any).setAvatarTexture === 'function') {
-                        (seatUi as any).setAvatarTexture(defaultTex);
-                    }
+                    if (defaultTex && typeof (seatUi as any).setAvatarTexture === 'function') (seatUi as any).setAvatarTexture(defaultTex);
 
-                    // Manda o PixiJS baixar a nova imagem da rede
                     PIXI.Assets.load(avatarUrl).then((texture) => {
                         this.avatarTextureCache.set(avatarUrl, texture);
-                        if (typeof (seatUi as any).setAvatarTexture === 'function') {
-                            (seatUi as any).setAvatarTexture(texture);
-                        }
+                        if (typeof (seatUi as any).setAvatarTexture === 'function') (seatUi as any).setAvatarTexture(texture);
                     }).catch(e => console.error("Erro ao carregar avatar", e));
                 }
             }
@@ -402,14 +241,10 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         this.updateDeckVisibility();
     }
     
-
     public clearPotChips() {
         this.potChipsUI.forEach(chip => this.safeDestroy(chip));
         this.potChipsUI.length = 0;
-        
-        if (this.potStackSprite) {
-            this.potStackSprite.visible = false;
-        }
+        if (this.boardUI && this.boardUI.potStackSprite) this.boardUI.potStackSprite.visible = false;
     }
 
     public clearDealtCards() {
@@ -422,29 +257,37 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         this.isHeroCardsHidden = !visible;
         if (this.heroPixiCards) {
             this.heroPixiCards.forEach(card => {
-                if (card && !card.destroyed) {
-                    card.visible = visible;
-                }
+                if (card && !card.destroyed) card.visible = visible;
             });
         }
     }
 
     public startTimer(seatIndex: number, timeLeftSeconds: number) {
         this.stopTimer(); 
-        
         this.activeTimerSeat = seatIndex;
+        this.ultimoBlocoTempo = -1;
         const safeTime = Math.min(timeLeftSeconds || this.TIMER_DURATION_SEC, this.TIMER_DURATION_SEC);
         this.turnEndTime = Date.now() + (safeTime * 1000);
         
-        const seatUi = this.playerSeats[seatIndex];
-        if (seatUi) {
-            seatUi.startTimer();
-        }
+        if (this.playerSeats[seatIndex]) this.playerSeats[seatIndex].startTimer();
     }
 
     public stopTimer() {
         this.activeTimerSeat = -1;
+        this.ultimoBlocoTempo = -1;
+        this.pararSom(this.somTimer);
+        this.pararSom(this.somAlarm);
         this.playerSeats.forEach(seat => seat.stopTimer());
+    }
+
+    public async performAnimation(obj: PIXI.Container, targetX: number, targetY: number, speed: number) {
+        if (!obj || obj.destroyed || !this.app) return Promise.resolve();
+        if (document.hidden) {
+            obj.x = targetX;
+            obj.y = targetY;
+            return Promise.resolve();
+        }
+        return Animator.animateTo(this.app, obj, targetX, targetY, speed);
     }
 
     public async startGameAutomatically() {
@@ -465,17 +308,12 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
                 const antePromises = [];
                 for (let i = 0; i < this.gameState.maxPlayers; i++) {
                     if (this.gameState.players[i] && this.gameState.players[i].isSeated && this.gameState.players[i].status === 'playing') {
-                        
                         const coords = this.seatCoords[i];
-                        const pX = coords?.x ?? 0;
-                        const pY = coords?.y ?? 0;
-                        
-                        const rX = this.POT_X - 35;
-                        const rY = this.POT_Y; 
-                        
-                        antePromises.push(this.throwCustomChip(pX, pY, rX, rY, undefined, false).then(chip => { 
+                        antePromises.push(MeinhoAnimator.throwCustomChip(this, coords?.x ?? 0, coords?.y ?? 0, this.POT_X - 35, this.POT_Y, undefined, false).then(chip => { 
                             if (chip) {
-                                this.playChipHitPotAnimation();
+                                this.tocarSom(this.somChip);
+                                if (this.boardUI) this.boardUI.playChipHitPotAnimation();
+                                MeinhoHelper.spawnPotHitParticles(this.particleLayer, this.activeFireParticles, this.POT_X, this.POT_Y);
                                 chip.visible = false; 
                                 this.potChipsUI.push(chip);
                             }
@@ -486,12 +324,8 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
             }
 
             const dealOrder: number[] = [];
-            for (let i = 0; i < this.gameState.maxPlayers; i++) {
-                if (this.gameState.players[i] && this.gameState.players[i].isSeated && this.gameState.players[i].status === 'playing') dealOrder.push(i * 2);
-            }
-            for (let i = 0; i < this.gameState.maxPlayers; i++) {
-                if (this.gameState.players[i] && this.gameState.players[i].isSeated && this.gameState.players[i].status === 'playing') dealOrder.push(i * 2 + 1);
-            }
+            for (let i = 0; i < this.gameState.maxPlayers; i++) if (this.gameState.players[i] && this.gameState.players[i].isSeated && this.gameState.players[i].status === 'playing') dealOrder.push(i * 2);
+            for (let i = 0; i < this.gameState.maxPlayers; i++) if (this.gameState.players[i] && this.gameState.players[i].isSeated && this.gameState.players[i].status === 'playing') dealOrder.push(i * 2 + 1);
 
             for (const targetIndex of dealOrder) {
                 if (!this.app || !this.deckInstance) break;
@@ -519,20 +353,18 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
                 
                 card.scale.set(finalScale);
 
-                if (isTargetHero && this.isHeroCardsHidden) {
-                    card.visible = false;
-                }
+                if (isTargetHero && this.isHeroCardsHidden) card.visible = false;
 
                 this.mainLayer.addChild(card);
                 this.dealtCardsUI.push(card); 
                 
-                if (isTargetHero) {
-                    this.heroPixiCards.push(card); 
-                }
+                if (isTargetHero) this.heroPixiCards.push(card); 
                 
                 if (!player.uiCards) player.uiCards = [];
                 player.uiCards.push(card);
                 
+                this.tocarSom(this.somCarta);
+
                 const trailAnim = () => {
                     const p = new PIXI.Graphics();
                     p.circle(0, 0, 3);
@@ -540,9 +372,7 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
                     p.x = card.x;
                     p.y = card.y;
                     this.particleLayer.addChild(p);
-                    this.activeFireParticles.push({
-                        mesh: p, life: 0.6, vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5
-                    });
+                    this.activeFireParticles.push({ mesh: p, life: 0.6, vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5 });
                 };
                 this.app.ticker.add(trailAnim);
                 
@@ -643,10 +473,7 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         const currentPlayer = this.gameState.players[seatIndex];
         if (!currentPlayer) return;
 
-        if (this.activeTimerSeat === seatIndex) {
-            this.stopTimer(); 
-        }
-
+        if (this.activeTimerSeat === seatIndex) this.stopTimer(); 
 
         currentPlayer.status = 'out';
         this.darkenAvatar(seatIndex); 
@@ -661,7 +488,8 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         }
 
         if (cardsToTrash.length > 0) {
-            await this.discardCards(cardsToTrash);
+            this.tocarSom(this.somPular);
+            await MeinhoAnimator.discardCards(this, cardsToTrash);
         }
         currentPlayer.uiCards = []; 
     }
@@ -672,40 +500,18 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         const currentPlayer = this.gameState.players[seatIndex];
         if (!currentPlayer) return;
 
-        if (this.activeTimerSeat === seatIndex) {
-            this.stopTimer(); 
-        }
+        if (this.activeTimerSeat === seatIndex) this.stopTimer(); 
 
         let revealedCards = playedCards || [];
         let centerCard = centerCardRevealed || "2♥";
 
-const coords = this.seatCoords[seatIndex];
-        const pX = coords?.x ?? 0;
-        const pY = coords?.y ?? 0;
-
-        // 👇 SOLUÇÃO: Cálculo geométrico apontando sempre para o Pote
-        const targetPotX = this.POT_X - 35; // O centro visual da pilha do pote
-        const targetPotY = this.POT_Y;
-        
-        const dx = targetPotX - pX;
-        const dy = targetPotY - pY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        
-        // Distância que a ficha para na frente do avatar (ajuste se quiser mais perto/longe)
-        const betDistance = 75; 
-        
-        let betX = pX;
-        let betY = pY;
-        
-        if (dist > 0) {
-            betX = pX + (dx / dist) * betDistance;
-            betY = pY + (dy / dist) * betDistance;
-        }
-        // 👆 Fim do novo cálculo
+        const coords = this.seatCoords[seatIndex];
+        const { betX, betY } = MeinhoHelper.getBetTarget(coords?.x ?? 0, coords?.y ?? 0, this.POT_X - 35, this.POT_Y);
       
-        const betChip = await this.throwCustomChip(pX, pY, betX, betY, betAmount, false);
-        this.gameState.phase = 'resolving';
+        const betChip = await MeinhoAnimator.throwCustomChip(this, coords?.x ?? 0, coords?.y ?? 0, betX, betY, betAmount, false);
+        this.tocarSom(this.somChip);
         
+        this.gameState.phase = 'resolving';
         await this.pixiDelay(800);
 
         let uiCardsSeguros: PIXI.Container[] = [];
@@ -889,21 +695,9 @@ const coords = this.seatCoords[seatIndex];
         const playerName = currentPlayer.isHero ? "Você" : currentPlayer.name;
 
         if (isWin) {
-            // 1. Calcula o total bruto puxado da mesa
-            const ganhoBruto = betAmount * 2;
-            const rakeRate = this.gameState.rake ? (this.gameState.rake / 100) : 0;
-            const rakeCut = ganhoBruto * rakeRate;
+            const winMath = MeinhoHelper.calcWin(betAmount, this.gameState.rake);
             
-            // 2. Valor total que vai para a carteira (Aposta + Lucro - Rake)
-            const totalCreditado = ganhoBruto - rakeCut;
-            
-            // 3. LUCRO LÍQUIDO: O total recebido menos a aposta original
-            const lucroLiquido = totalCreditado - betAmount;
-            
-            const formatadoTexto = lucroLiquido.toFixed(2).replace('.', ',');
-
-            // O texto agora mostra SÓ O LUCRO
-            const wonText = currentPlayer.isHero ? `Parabéns!\nVocê ganhou R$ ${formatadoTexto}` : `${playerName} ganhou\nR$ ${formatadoTexto}`;
+            const wonText = currentPlayer.isHero ? `Parabéns!\nVocê ganhou R$ ${winMath.formatadoTexto}` : `${playerName} ganhou\nR$ ${winMath.formatadoTexto}`;
             resultTextObj = new PIXI.Text({
                 text: wonText,
                 style: { fontFamily: 'Arial', fontSize: 14, fill: 0xFFD700, fontWeight: 'bold', align: 'center', stroke: '#000000', strokeThickness: 3 }
@@ -911,19 +705,25 @@ const coords = this.seatCoords[seatIndex];
             resultTextObj.anchor.set(0.5);
             resultTextObj.x = 215;
             resultTextObj.y = 510; 
-            if (!document.hidden) this.mainLayer.addChild(resultTextObj);
-
-            // A ficha animada continua mostrando o bolo total (Aposta + Lucro) voltando pra ele
-            const valorParaFicha = Number(totalCreditado.toFixed(2));
-            const winChip = await this.throwCustomChip(this.POT_X - 35, this.POT_Y, betX + 15, betY, valorParaFicha, false);
             
+            if (!document.hidden) {
+                this.mainLayer.addChild(resultTextObj);
+                if (currentPlayer.isHero) this.tocarSom(this.somVitoria);
+            }
+
+            const winChip = await MeinhoAnimator.throwCustomChip(this, this.POT_X - 35, this.POT_Y, betX + 15, betY, Number(winMath.totalCreditado.toFixed(2)), false);
+            this.tocarSom(this.somChips);
+
             await this.pixiDelay(800);
             
             if (betChip) {
-                this.performAnimation(betChip, pX, pY, 15).then(() => this.safeDestroy(betChip));
+                this.performAnimation(betChip, coords?.x ?? 0, coords?.y ?? 0, 15).then(() => {
+                    this.tocarSom(this.somChips);
+                    this.safeDestroy(betChip);
+                });
             }
             if (winChip) {
-                this.performAnimation(winChip, pX, pY, 15).then(() => this.safeDestroy(winChip));
+                this.performAnimation(winChip, coords?.x ?? 0, coords?.y ?? 0, 15).then(() => this.safeDestroy(winChip));
             }
             await this.pixiDelay(2500);
 
@@ -936,7 +736,11 @@ const coords = this.seatCoords[seatIndex];
             resultTextObj.anchor.set(0.5);
             resultTextObj.x = 215;
             resultTextObj.y = 510; 
-            if (!document.hidden) this.mainLayer.addChild(resultTextObj);
+            
+            if (!document.hidden) {
+                this.mainLayer.addChild(resultTextObj);
+                if (currentPlayer.isHero) this.tocarSom(this.somDerrota);
+            }
 
             await this.pixiDelay(800);
 
@@ -944,8 +748,10 @@ const coords = this.seatCoords[seatIndex];
                 while(betChip.children.length > 1) { betChip.removeChildAt(1); } 
                 
                 await this.performAnimation(betChip, this.POT_X - 35, this.POT_Y, 15);
+                this.tocarSom(this.somChip);
                 
-                this.playChipHitPotAnimation(); 
+                if (this.boardUI) this.boardUI.playChipHitPotAnimation(); 
+                MeinhoHelper.spawnPotHitParticles(this.particleLayer, this.activeFireParticles, this.POT_X, this.POT_Y);
                 
                 betChip.visible = false;
                 this.potChipsUI.push(betChip); 
@@ -964,7 +770,7 @@ const coords = this.seatCoords[seatIndex];
         }
         if (finalCenterCard) cardsToTrash.push(finalCenterCard);
 
-        await this.discardCards(cardsToTrash);
+        await MeinhoAnimator.discardCards(this, cardsToTrash);
         
         if (currentPlayer.isHero) {
             this.heroPixiCards = [];
@@ -994,9 +800,11 @@ const coords = this.seatCoords[seatIndex];
                 const pX = coords?.x ?? 0;
                 const pY = coords?.y ?? 0;
                 
-                antePromises.push(this.throwCustomChip(pX, pY, this.POT_X - 35, this.POT_Y, undefined, false).then(chip => { 
+                antePromises.push(MeinhoAnimator.throwCustomChip(this, pX, pY, this.POT_X - 35, this.POT_Y, undefined, false).then(chip => { 
                     if (chip) {
-                        this.playChipHitPotAnimation(); 
+                        this.tocarSom(this.somChip);
+                        if (this.boardUI) this.boardUI.playChipHitPotAnimation(); 
+                        MeinhoHelper.spawnPotHitParticles(this.particleLayer, this.activeFireParticles, this.POT_X, this.POT_Y);
                         chip.visible = false;
                         this.potChipsUI.push(chip);
                     }
@@ -1012,6 +820,9 @@ const coords = this.seatCoords[seatIndex];
     }
 
     public destroy() {
+        this.pararSom(this.somTimer);
+        this.pararSom(this.somAlarm);
+        
         this.activeFireParticles.forEach(p => {
             if (p.mesh.parent) p.mesh.parent.removeChild(p.mesh);
             p.mesh.destroy();
@@ -1024,7 +835,7 @@ const coords = this.seatCoords[seatIndex];
         }
     }
 
-    private safeDestroy(obj: PIXI.Container | null) {
+    public safeDestroy(obj: PIXI.Container | null) {
         if (obj && !obj.destroyed) {
             obj.visible = false; 
             if (this.app && obj.parent) obj.parent.removeChild(obj);
@@ -1044,7 +855,7 @@ const coords = this.seatCoords[seatIndex];
         }
     }
 
-    private pixiDelay(ms: number): Promise<void> {
+    public pixiDelay(ms: number): Promise<void> {
         return new Promise(resolve => {
             if (!this.app || !this.app.ticker) {
                 resolve();
@@ -1064,64 +875,60 @@ const coords = this.seatCoords[seatIndex];
         });
     }
 
-    private async performAnimation(obj: PIXI.Container, targetX: number, targetY: number, speed: number) {
-        if (!obj || obj.destroyed || !this.app) return Promise.resolve();
-        if (document.hidden) {
-            obj.x = targetX;
-            obj.y = targetY;
-            return Promise.resolve();
-        }
-        return Animator.animateTo(this.app, obj, targetX, targetY, speed);
-    }
-
     private updateFramePixi() {
         if (!this.app) return;
         
-        if (this.tableInfoTextUI) {
-            this.tableInfoTextUI.text = `JOGO: MEINHO\nMESA: ${(this.gameState.tableName || 'CARREGANDO...').toUpperCase()}\nBUY-IN: R$ ${this.gameState.tableMinBuyIn}\nANTE: R$ ${this.gameState.minBet}`;
+        if (this.boardUI) {
+            this.boardUI.updateTexts(this.gameState.tableName, this.gameState.tableMinBuyIn, this.gameState.minBet, this.gameState.pot);
         }
 
         if (this.gameState.pot > 0 && Math.random() > 0.8) {
-            const p = new PIXI.Graphics();
-            const size = Math.random() * 2 + 1;
-            p.circle(0, 0, size);
-            p.fill({ color: this.MAGIC_COLORS[Math.floor(Math.random() * this.MAGIC_COLORS.length)], alpha: 0.6 });
-            p.x = (this.POT_X - 35) + (Math.random() - 0.5) * 40;
-            p.y = this.POT_Y + (Math.random() - 0.5) * 20;
-            this.particleLayer.addChild(p);
-            this.activeFireParticles.push({ mesh: p, life: 1.0, vx: (Math.random() - 0.5) * 0.5, vy: Math.random() * -1 - 0.5 });
+            MeinhoHelper.spawnIdlePotParticles(this.particleLayer, this.activeFireParticles, this.POT_X, this.POT_Y, this.MAGIC_COLORS);
         }
 
-        for (let i = this.activeFireParticles.length - 1; i >= 0; i--) {
-            const p = this.activeFireParticles[i];
-            p.life -= 0.05; 
-            p.mesh.alpha = Math.max(0, p.life);
-            p.mesh.x += p.vx;
-            p.mesh.y += p.vy;
-            p.mesh.scale.set(Math.max(0, p.life));
-
-            if (p.life <= 0) {
-                if (p.mesh.parent) p.mesh.parent.removeChild(p.mesh);
-                p.mesh.destroy();
-                this.activeFireParticles.splice(i, 1);
-            }
-        }
+        MeinhoHelper.updateParticles(this.activeFireParticles);
 
         if (this.activeTimerSeat === -1) return;
         const seatUi = this.playerSeats[this.activeTimerSeat];
         if (!seatUi) return;
 
         const timeLeft = this.turnEndTime - Date.now();
+        const currentSec = Math.ceil(timeLeft / 1000);
 
         if (timeLeft <= 0) {
+            this.pararSom(this.somTimer);
+            this.pararSom(this.somAlarm);
+            this.ultimoBlocoTempo = -1;
             seatUi.updateTimer(0, 0);
             return;
         }
 
-        const progress = Math.min(1, Math.max(0, timeLeft / (this.TIMER_DURATION_SEC * 1000)));
-        const secLeft = Math.ceil(timeLeft / 1000);
+        const activePlayer = this.gameState.players[this.activeTimerSeat];
+        const isHeroTurn = activePlayer && activePlayer.isHero;
 
-        seatUi.updateTimer(progress, secLeft);
+        if (isHeroTurn && !document.hidden) {
+            const blocoAtual = Math.ceil(currentSec / 5);
+
+            if (blocoAtual !== this.ultimoBlocoTempo) {
+                this.ultimoBlocoTempo = blocoAtual; 
+
+                if (currentSec > 5) {
+                    this.pararSom(this.somAlarm);
+                    this.tocarSom(this.somTimer);
+                } else {
+                    this.pararSom(this.somTimer);
+                    this.tocarSom(this.somAlarm); 
+                }
+            }
+        } else {
+            this.pararSom(this.somTimer);
+            this.pararSom(this.somAlarm);
+            this.ultimoBlocoTempo = -1;
+        }
+
+        const progress = Math.min(1, Math.max(0, timeLeft / (this.TIMER_DURATION_SEC * 1000)));
+
+        seatUi.updateTimer(progress, currentSec);
 
         if (progress > 0 && timeLeft > 0) {
             const tipPos = seatUi.getTimerTipPosition(progress);
@@ -1140,249 +947,15 @@ const coords = this.seatCoords[seatIndex];
         }
     }
 
-    private async discardCards(cardsToDiscard: PIXI.Container[]) {
-        if (!this.app || cardsToDiscard.length === 0) return;
-
-        this.isDiscardingCards = true;
-        this.updateDeckVisibility();
-
-        const PORTAL_X = 265; 
-        const PORTAL_Y = 420; 
-
-        const CORE_RADIUS = 12; 
-        const blackHoleCore = new PIXI.Graphics();
-        blackHoleCore.circle(0, 0, CORE_RADIUS); 
-        blackHoleCore.fill({ color: 0x000000, alpha: 1 });
-        blackHoleCore.x = PORTAL_X;
-        blackHoleCore.y = PORTAL_Y;
-        this.mainLayer.addChild(blackHoleCore);
-
-        let portalActive = true;
-        let angleOffset = 0;
-        let coreScale = 1.0; 
-
-        const emitPlasmaAnim = () => {
-            if (!portalActive || !this.app) return;
-            
-            angleOffset += 0.25; 
-
-            const particlesPerFrame = 20; 
-            for (let i = 0; i < particlesPerFrame; i++) {
-                const p = new PIXI.Graphics();
-                
-                const size = Math.random() * 2 + 1;
-                p.circle(0, 0, size);
-                
-                const color = this.MAGIC_COLORS[Math.floor(Math.random() * this.MAGIC_COLORS.length)];
-                p.fill({ color: color, alpha: 0.8 });
-
-                const spawnRadius = CORE_RADIUS * coreScale; 
-                const angle = angleOffset + (i * (Math.PI * 2 / particlesPerFrame));
-                
-                p.x = PORTAL_X + Math.cos(angle) * spawnRadius;
-                p.y = PORTAL_Y + Math.sin(angle) * spawnRadius;
-                
-                this.mainLayer.addChild(p);
-
-                const radialSpeed = 1.0 + Math.random() * 2.0;
-                const vrX = Math.cos(angle) * radialSpeed;
-                const vrY = Math.sin(angle) * radialSpeed;
-
-                const orbitalSpeed = 3.0; 
-                const vtX = Math.cos(angle + Math.PI / 2) * orbitalSpeed;
-                const vtY = Math.sin(angle + Math.PI / 2) * orbitalSpeed;
-
-                const life = 0.6 + Math.random() * 0.4;
-
-                this.activeFireParticles.push({ 
-                    mesh: p, 
-                    life: life, 
-                    vx: vrX + vtX, 
-                    vy: vrY + vtY 
-                });
-            }
-        };
-        this.app.ticker.add(emitPlasmaAnim);
-
-        const collectPromises = cardsToDiscard.map((card, index) => {
-            if (!card || card.destroyed) return Promise.resolve();
-            
-            card.filters = []; 
-            
-            if (card.parent === this.mainLayer) {
-                this.mainLayer.setChildIndex(card, this.mainLayer.children.length - 1);
-            }
-
-            if (document.hidden) {
-                const idx = this.dealtCardsUI.indexOf(card);
-                if (idx > -1) this.dealtCardsUI.splice(idx, 1);
-                this.safeDestroy(card);
-                return Promise.resolve();
-            }
-
-            return new Promise<void>((resolve) => {
-                this.pixiDelay(index * 100).then(() => {
-                    if (!card || card.destroyed || !this.app || !this.app.ticker) return resolve();
-
-                    const startX = card.x;
-                    const startY = card.y;
-                    const originalScaleX = Math.abs(card.scale.x);
-                    const originalScaleY = Math.abs(card.scale.y);
-                    
-                    let progress = 0;
-                    const speed = 0.012 + (Math.random() * 0.008); 
-
-                    const suckAnim = () => {
-                        if (!card || card.destroyed || !this.app || !this.app.ticker) {
-                            if (this.app && this.app.ticker) this.app.ticker.remove(suckAnim);
-                            resolve();
-                            return;
-                        }
-
-                        progress += speed;
-                        if (progress >= 1) progress = 1;
-
-                        const gravityPull = progress * progress * progress * progress; 
-                        
-                        const orbitAngle = gravityPull * Math.PI * 1.5; 
-                        const dx = startX - PORTAL_X;
-                        const dy = startY - PORTAL_Y;
-                        const dist = Math.sqrt(dx*dx + dy*dy);
-                        const initialAngle = Math.atan2(dy, dx);
-
-                        const currentDist = dist * (1 - gravityPull);
-                        card.x = PORTAL_X + Math.cos(initialAngle + orbitAngle) * currentDist;
-                        card.y = PORTAL_Y + Math.sin(initialAngle + orbitAngle) * currentDist;
-
-                        card.rotation += 0.2 + (gravityPull * 0.8);
-                        
-                        card.scale.set(
-                            originalScaleX * (1 - gravityPull), 
-                            originalScaleY * (1 - (gravityPull * 0.5)) 
-                        );
-                        card.alpha = 1 - gravityPull; 
-
-                        if (progress === 1) {
-                            if (this.app && this.app.ticker) this.app.ticker.remove(suckAnim);
-                            
-                            const idx = this.dealtCardsUI.indexOf(card);
-                            if (idx > -1) this.dealtCardsUI.splice(idx, 1);
-                            this.safeDestroy(card);
-                            resolve();
-                        }
-                    };
-                    this.app.ticker.add(suckAnim);
-                });
-            });
-        });
-
-        await Promise.all(collectPromises);
-        
-        await new Promise<void>((resolve) => {
-            const collapseAnim = () => {
-                if (!this.app || !this.app.ticker) {
-                    resolve();
-                    return;
-                }
-                
-                coreScale -= 0.06; 
-                
-                if (coreScale <= 0) {
-                    coreScale = 0;
-                    if (this.app && this.app.ticker) this.app.ticker.remove(collapseAnim);
-                    
-                    for(let i = 0; i < 40; i++) {
-                        const p = new PIXI.Graphics();
-                        p.circle(0, 0, Math.random() * 3 + 1.5);
-                        p.fill({ color: this.MAGIC_COLORS[Math.floor(Math.random() * this.MAGIC_COLORS.length)], alpha: 1 });
-                        p.x = PORTAL_X;
-                        p.y = PORTAL_Y;
-                        this.mainLayer.addChild(p);
-                        
-                        this.activeFireParticles.push({ 
-                            mesh: p, 
-                            life: 1.0, 
-                            vx: (Math.random() - 0.5) * 16, 
-                            vy: (Math.random() - 0.5) * 16 
-                        });
-                    }
-                    resolve();
-                }
-                
-                if (blackHoleCore && !blackHoleCore.destroyed) {
-                    blackHoleCore.scale.set(coreScale);
-                }
-            };
-            
-            if (this.app && this.app.ticker) {
-                this.app.ticker.add(collapseAnim);
-            } else {
-                resolve();
-            }
-        });
-
-        portalActive = false;
-        if (this.app && this.app.ticker) {
-            this.app.ticker.remove(emitPlasmaAnim);
-        }
-        
-        if (blackHoleCore.parent) blackHoleCore.parent.removeChild(blackHoleCore);
-        blackHoleCore.destroy();
-
-        this.isDiscardingCards = false;
-        this.updateDeckVisibility();
-    }
-
-    private async throwCustomChip(startX: number, startY: number, endX: number, endY: number, amount?: number, isPot: boolean = false) {
-        if (!this.app) return null;
-        const chipContainer = new PIXI.Container();
-        
-        const textureToUse = isPot ? this.potChipsTexture : this.singleChipTexture;
-
-        if (textureToUse) {
-            const sprite = new PIXI.Sprite(textureToUse);
-            sprite.anchor.set(0.5);
-            sprite.width = isPot ? 65 : 30; 
-            sprite.height = isPot ? 65 : 30; 
-            chipContainer.addChild(sprite);
-        }
-
-        if (amount !== undefined) {
-            const valueText = new PIXI.Text({
-                text: amount.toString(),
-                style: { fontFamily: 'Arial', fontSize: 11, fill: 0xffffff, fontWeight: 'bold' }
-            } as any);
-            valueText.anchor.set(0.5);
-            
-            const pillWidth = valueText.width + 12; 
-            const pillBg = new PIXI.Graphics();
-            
-            pillBg.roundRect(12, -14, pillWidth, 20, 10);
-            pillBg.fill({ color: 0x000000, alpha: 0.75 });
-            pillBg.stroke({ width: 1, color: 0x00f3ff, alpha: 0.8 }); 
-            
-            valueText.x = 12 + (pillWidth / 2);
-            valueText.y = -4; 
-            
-            chipContainer.addChild(pillBg);
-            chipContainer.addChild(valueText);
-        }
-
-        chipContainer.x = startX;
-        chipContainer.y = startY;
-        this.mainLayer.addChild(chipContainer);
-
-        await this.performAnimation(chipContainer, endX, endY, 15); 
-        return chipContainer;
-    }
-
     public playSitEffect(visualSeatIndex: number) {
+        this.tocarSom(this.somSentar);
         if (this.playerSeats && this.playerSeats[visualSeatIndex]) {
             this.playerSeats[visualSeatIndex].playSitAnimation();
         }
     }
 
     public playStandEffect(visualSeatIndex: number) {
+        this.tocarSom(this.somLevantar);
         if (this.playerSeats && this.playerSeats[visualSeatIndex]) {
             this.playerSeats[visualSeatIndex].playStandAnimation();
         }
