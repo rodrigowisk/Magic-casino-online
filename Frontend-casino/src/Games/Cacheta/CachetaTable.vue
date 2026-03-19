@@ -38,12 +38,18 @@
         <p>O jogador <strong>{{ winnerName }}</strong> venceu a rodada!</p>
       </div>
 
+      <div class="furou-banner" v-if="furouData">
+        <h2>❌ FUROU! ❌</h2>
+        <p>O jogador <strong>{{ furouData.name }}</strong> bateu errado!</p>
+      </div>
+
       <div class="ui-layer">
         <div class="controls-wrapper" v-if="gameState.phase === 'betting' && !isDealing && !isAnimating && gameState.players[gameState.currentTurn]?.isHero && gameState.players[gameState.currentTurn]?.status === 'playing'">
           <CachetaControls 
             :hasDrawnThisTurn="gameState.players[gameState.currentTurn].hasDrawnThisTurn"
             :canDrawFromDiscard="gameState.discardPile.length > 0"
             :selectedCard="selectedCardToDiscard"
+            :hasFurou="gameState.players[gameState.currentTurn].hasFurou"
             @draw="(fromDiscard) => cachetaHub.drawCard(fromDiscard)"
             @discard="(cardStr) => {
               cachetaHub.discardCard(cardStr);
@@ -54,6 +60,12 @@
               selectedCardToDiscard = null;
             }"
           />
+        </div>
+
+        <div class="next-round-wrapper" v-if="gameState.phase === 'waiting' && heroPlayerInfo?.isSeated && heroPlayerInfo?.status === 'waiting' && !showRebuyModal && !showBuyInModal">
+          <button class="btn-continuar" @click="prontaParaProxima">
+            <span class="pulse-icon">✅</span> CONTINUAR JOGANDO
+          </button>
         </div>
       </div>
 
@@ -161,6 +173,7 @@ const animModeEnabled = ref(localStorage.getItem('magic_anim_enabled') !== '0');
 
 const selectedCardToDiscard = ref<string | null>(null);
 const winnerName = ref<string | null>(null);
+const furouData = ref<{ seat: number, name: string, cards: string[] } | null>(null);
 
 const isDealing = ref(false); 
 const isAnimating = ref(false); 
@@ -189,6 +202,7 @@ interface Player {
   status: 'waiting' | 'playing' | 'out' | 'done' | 'ready';
   isSeated: boolean; 
   hasDrawnThisTurn: boolean; 
+  hasFurou: boolean;
   avatar?: string; 
   uiCards?: any[]; 
   x?: number; y?: number; 
@@ -236,9 +250,9 @@ const modalMaxBalance = computed(() => {
     return userTotalBalance.value;
 });
 
+const heroPlayerInfo = computed(() => gameState.players.find(p => p.isHero));
 const myLogicalSeatOffset = ref(0);
 
-// 👇 IDENTIFICA O VENCEDOR VISUALMENTE PELA FASE RESOLVING 👇
 watch(() => gameState.phase, (newPhase, oldPhase) => {
     if (newPhase === 'resolving') {
         const possibleWinner = gameState.players.find(p => p.isSeated && p.status === 'playing' && p.serverCards && p.serverCards.length >= 9);
@@ -298,8 +312,26 @@ const cachetaHub = useCachetaHub(tableId, currentUserId, currentUserName, curren
     onReceiveTableState: (serverState: any) => syncTable(serverState),
     onWalletBalanceUpdated: (newBalance: number) => {
         userTotalBalance.value = newBalance;
+    },
+    // 👇 RECEBE O EVENTO FUROU AQUI 👇
+    onPlayerFurou: (data: any) => {
+        furouData.value = data;
+        
+        const visualSeat = (data.seat - myLogicalSeatOffset.value + gameState.maxPlayers) % gameState.maxPlayers;
+        engine.showFurouCards(visualSeat, data.cards);
+        
+        setTimeout(() => {
+            furouData.value = null;
+            engine.clearFurouCards();
+        }, 4000);
     }
 });
+
+function prontaParaProxima() {
+  if (typeof cachetaHub.readyForNextRound === 'function') {
+    cachetaHub.readyForNextRound();
+  }
+}
 
 function handleRebuyCancel() {
     showRebuyModal.value = false;
@@ -367,7 +399,7 @@ function applyState(serverState: any) {
           gameState.players.push({ 
             seat: gameState.players.length, 
             name: "Livre", chips: 0, totalBuyIn: 0, totalCashOut: 0, lastChips: 0, 
-            isHero: false, status: 'waiting', isSeated: false, hasDrawnThisTurn: false 
+            isHero: false, status: 'waiting', isSeated: false, hasDrawnThisTurn: false, hasFurou: false 
           });
       }
       
@@ -392,7 +424,8 @@ function applyState(serverState: any) {
           cards: p.cards || p.Cards || [],
           status: String(p.status || p.Status || 'waiting').toLowerCase(),
           avatar: String(p.avatar || p.Avatar || 'default.webp'),
-          hasDrawnThisTurn: !!(p.hasDrawnThisTurn || p.HasDrawnThisTurn) 
+          hasDrawnThisTurn: !!(p.hasDrawnThisTurn || p.HasDrawnThisTurn),
+          hasFurou: !!(p.hasFurou || p.HasFurou)
       };
   });
 
@@ -459,6 +492,7 @@ function applyState(serverState: any) {
       player.lastChips = 0;
       player.userId = undefined;
       player.hasDrawnThisTurn = false;
+      player.hasFurou = false;
       player.avatar = 'default.webp'; 
     }
     engine.updatePlayerSeat(i, false, "Livre", 0, 'waiting', getAvatarUrl('default.webp'));
@@ -483,6 +517,7 @@ function applyState(serverState: any) {
         player.status = p.status as any;
         player.avatar = p.avatar;
         player.hasDrawnThisTurn = p.hasDrawnThisTurn; 
+        player.hasFurou = p.hasFurou;
       }
       
       const resolvedAvatarUrl = getAvatarUrl(p.avatar);
@@ -501,7 +536,6 @@ function applyState(serverState: any) {
   gameState.tableName = String(serverState.name || serverState.Name || 'MESA DE CACHETA');
   gameState.expiresAt = String(serverState.expiresAt || serverState.ExpiresAt || '');
 
-  // 👇 MOSTRA O REBUY MODAL QUANDO TERMINA A RODADA SE ELE ESTIVER SEM FICHAS 👇
   if (heroPlayer && heroPlayer.isSeated && heroPlayer.chips <= 0 && heroPlayer.status !== 'playing') {
       fetchUserBalance().then(() => showRebuyModal.value = true);
   } else {
@@ -571,13 +605,11 @@ function invokeStandUp() {
 }
 
 function clicouMenu() { showMenuModal.value = true; }
-
 function clicouEstatisticas() { showStatsModal.value = true; }
 
 async function clicouVerMaos() { 
   try {
       const CACHETA_API_URL = import.meta.env.VITE_CACHETA_API_URL || 'http://localhost:5003';
-      
       const response = await fetch(`${CACHETA_API_URL}/api/handhistory/${tableId}`);
       if (response.ok) {
           const data = await response.json();
@@ -591,9 +623,7 @@ async function clicouVerMaos() {
 
 function handleMenuLeave() { 
     showMenuModal.value = false; 
-    
     const hero = gameState.players.find(p => p.isHero && p.isSeated);
-    
     if (hero && hero.status === 'playing' && gameState.phase !== 'waiting') {
         isWaitingToLeave.value = true; 
         if (cachetaHub.setLeaveNextHand) cachetaHub.setLeaveNextHand(true); 
@@ -650,6 +680,10 @@ onUnmounted(() => {
 .ui-layer { position: absolute; top: 0; left: 0; width: 430px; height: 900px; z-index: 300; pointer-events: none !important; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; padding: 40px 0 15px 0; box-sizing: border-box; }
 .ui-layer > * { pointer-events: auto !important; }
 .controls-wrapper { width: 100%; margin-bottom: 16px; display: flex; justify-content: center; }
+.next-round-wrapper { width: 100%; margin-bottom: 25px; display: flex; justify-content: center; animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+.btn-continuar { background: linear-gradient(135deg, #2ecc71, #27ae60); border: 2px solid #1e8449; color: white; padding: 14px 28px; border-radius: 12px; font-size: 15px; font-weight: 900; cursor: pointer; box-shadow: 0 6px 20px rgba(46, 204, 113, 0.4), inset 0px 2px 2px rgba(255,255,255,0.4); text-transform: uppercase; text-shadow: 1px 1px 3px rgba(0,0,0,0.8); display: flex; align-items: center; gap: 10px; transition: all 0.1s ease; }
+.btn-continuar:active { transform: translateY(4px); box-shadow: 0 2px 10px rgba(46, 204, 113, 0.4); }
+.pulse-icon { font-size: 18px; animation: pulseBater 1.5s infinite; }
 .hud-btn { position: absolute; width: 46px; height: 46px; background: linear-gradient(135deg, rgba(20, 28, 45, 0.85), rgba(10, 15, 25, 0.95)); border: 1px solid rgba(0, 243, 255, 0.3); border-radius: 12px; display: flex; justify-content: center; align-items: center; cursor: pointer; z-index: 50; box-shadow: 0 4px 15px rgba(0,0,0,0.6), inset 0 0 10px rgba(0, 243, 255, 0.1); backdrop-filter: blur(8px); transition: all 0.2s ease-in-out; padding: 0; outline: none; pointer-events: auto !important; }
 .hud-btn:hover, .hud-btn:active { transform: scale(1.08) translateY(-2px); border-color: rgba(0, 243, 255, 0.8); box-shadow: 0 6px 20px rgba(0, 243, 255, 0.4), inset 0 0 15px rgba(0, 243, 255, 0.3); }
 .hud-btn svg { width: 22px; height: 22px; stroke: #00f3ff; filter: drop-shadow(0 0 4px rgba(0, 243, 255, 0.8)); }
@@ -657,87 +691,34 @@ onUnmounted(() => {
 .hud-top-right { top: 20px; right: 20px; }
 .hud-bottom-left { bottom: 20px; left: 20px; }
 .table-id-footer { position: absolute; bottom: 8px; left: 0; width: 100%; text-align: center; color: rgba(255, 255, 255, 0.3); font-family: Arial, sans-serif; font-size: 11px; white-space: nowrap; pointer-events: none; z-index: 50; }
+.leave-warning { position: absolute; top: 26px; left: 50%; transform: translateX(-50%); background: rgba(231, 76, 60, 0.95); border: 1px solid #ff7979; border-radius: 20px; padding: 6px 12px; display: flex; align-items: center; gap: 8px; box-shadow: 0 4px 15px rgba(231, 76, 60, 0.4); z-index: 500; animation: slideDownFade 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); width: max-content; max-width: 250px; }
+.leave-warning span { color: white; font-family: Arial, sans-serif; font-size: 11px; font-weight: bold; white-space: nowrap; }
+.leave-warning button { background: white; color: #e74c3c; border: none; border-radius: 8px; padding: 4px 8px; font-size: 9px; font-weight: 900; cursor: pointer; text-transform: uppercase; transition: transform 0.1s; }
+.leave-warning button:active { transform: scale(0.9); }
 
-.leave-warning {
+@keyframes slideDownFade { 0% { transform: translate(-50%, -20px); opacity: 0; } 100% { transform: translate(-50%, 0); opacity: 1; } }
+
+.winner-banner { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); background: rgba(10, 15, 25, 0.95); border: 2px solid #00f3ff; border-radius: 16px; padding: 20px 40px; text-align: center; z-index: 1000; box-shadow: 0 0 30px rgba(0, 243, 255, 0.5), inset 0 0 20px rgba(0, 243, 255, 0.3); animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+.winner-banner h2 { color: #ffaa00; margin: 0 0 10px 0; font-size: 26px; font-weight: 900; text-shadow: 0 0 15px rgba(255, 170, 0, 0.8); }
+.winner-banner p { color: white; font-size: 15px; margin: 0; }
+
+/* 👇 ESTILOS DO NOVO BANNER DE FURO 👇 */
+.furou-banner {
   position: absolute;
-  top: 26px; 
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(231, 76, 60, 0.95);
-  border: 1px solid #ff7979;
-  border-radius: 20px;
-  padding: 6px 12px; 
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  box-shadow: 0 4px 15px rgba(231, 76, 60, 0.4);
-  z-index: 500;
-  animation: slideDownFade 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  width: max-content;
-  max-width: 250px;
-}
-
-.leave-warning span {
-  color: white;
-  font-family: Arial, sans-serif;
-  font-size: 11px; 
-  font-weight: bold;
-  white-space: nowrap;
-}
-
-.leave-warning button {
-  background: white;
-  color: #e74c3c;
-  border: none;
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-size: 9px; 
-  font-weight: 900;
-  cursor: pointer;
-  text-transform: uppercase;
-  transition: transform 0.1s;
-}
-
-.leave-warning button:active {
-  transform: scale(0.9);
-}
-
-@keyframes slideDownFade {
-  0% { transform: translate(-50%, -20px); opacity: 0; }
-  100% { transform: translate(-50%, 0); opacity: 1; }
-}
-
-.winner-banner {
-  position: absolute;
-  top: 40%;
+  top: 35%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(10, 15, 25, 0.95);
-  border: 2px solid #00f3ff;
+  background: rgba(200, 20, 20, 0.95);
+  border: 2px solid #ff4444;
   border-radius: 16px;
-  padding: 20px 40px;
+  padding: 15px 30px;
   text-align: center;
   z-index: 1000;
-  box-shadow: 0 0 30px rgba(0, 243, 255, 0.5), inset 0 0 20px rgba(0, 243, 255, 0.3);
+  box-shadow: 0 0 30px rgba(255, 0, 0, 0.6), inset 0 0 15px rgba(255, 0, 0, 0.4);
   animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
+.furou-banner h2 { color: #ffffff; margin: 0 0 5px 0; font-size: 24px; font-weight: 900; text-shadow: 0 0 10px rgba(255, 255, 255, 0.8); }
+.furou-banner p { color: white; font-size: 14px; margin: 0; }
 
-.winner-banner h2 {
-  color: #ffaa00;
-  margin: 0 0 10px 0;
-  font-size: 26px;
-  font-weight: 900;
-  text-shadow: 0 0 15px rgba(255, 170, 0, 0.8);
-}
-
-.winner-banner p {
-  color: white;
-  font-size: 15px;
-  margin: 0;
-}
-
-@keyframes popIn {
-  0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; }
-  100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
-}
+@keyframes popIn { 0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; } 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; } }
 </style>

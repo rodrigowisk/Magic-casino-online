@@ -2,6 +2,7 @@ import * as PIXI from 'pixi.js';
 import { Deck } from '../Deck';
 import { PlayerSeat } from './PlayerSeat';
 import { Animator } from '../Animator';
+import { CachetaSorter } from './CachetaSorter';
 
 export interface CachetaEngineCallbacks {
     setDealing: (val: boolean) => void;
@@ -44,6 +45,7 @@ export class CachetaPixiEngine {
     public lixoCardsUI: PIXI.Container[] = [];
     public sortBtnUI: PIXI.Container | null = null; 
     public winnerCardsUI: PIXI.Container[] = []; 
+    public furouCardsUI: PIXI.Container[] = []; 
 
     public activeTimerSeat = -1;
     public turnEndTime = 0;
@@ -276,6 +278,7 @@ export class CachetaPixiEngine {
         
         this.winnerCardsUI.forEach(c => this.safeDestroy(c));
         this.winnerCardsUI = [];
+        this.clearFurouCards(); 
 
         this.heroCardData = []; 
         this.selectedCardStr = null;
@@ -287,6 +290,40 @@ export class CachetaPixiEngine {
                 if (p) p.uiCards = []; 
             });
         }
+    }
+
+    public showFurouCards(seatIndex: number, rawCards: string[]) {
+        this.clearFurouCards();
+        if (!this.app || !this.deckInstance || !rawCards) return;
+
+        const centerX = this.app.screen.width / 2;
+        const centerY = this.app.screen.height / 2;
+        const scale = this.CENTER_CARDS_SCALE * 0.8;
+
+        const spread = 25;
+        const startX = centerX - ((rawCards.length - 1) * spread) / 2;
+
+        rawCards.forEach((cardStr, i) => {
+            const rank = cardStr.slice(0, -1) || "A";
+            const suit = cardStr.slice(-1) || "♠";
+            const sprite = this.deckInstance!.createCardToDeal(true, rank, suit);
+            sprite.scale.set(scale);
+            
+            sprite.x = this.seatCoords[seatIndex]?.x || centerX;
+            sprite.y = this.seatCoords[seatIndex]?.y || centerY;
+            
+            sprite.tint = 0xffaaaa; 
+
+            this.cardLayer.addChild(sprite);
+            this.furouCardsUI.push(sprite);
+
+            this.performAnimation(sprite, startX + (i * spread), centerY + 40, 15);
+        });
+    }
+
+    public clearFurouCards() {
+        this.furouCardsUI.forEach(c => this.safeDestroy(c));
+        this.furouCardsUI = [];
     }
 
     public startTimer(seatIndex: number, timeLeftSeconds: number) {
@@ -306,6 +343,7 @@ export class CachetaPixiEngine {
         if (this.sortBtnUI) {
             this.sortBtnUI.x = x;
             this.sortBtnUI.y = y;
+            this.updateSortButtonIcon();
             return;
         }
         
@@ -331,11 +369,24 @@ export class CachetaPixiEngine {
         this.sortBtnUI.on('pointerdown', () => {
             this.sortBtnUI!.scale.set(0.85);
             setTimeout(() => { if(this.sortBtnUI) this.sortBtnUI.scale.set(1.0); }, 100);
-            this.sortMode = (this.sortMode + 1) % 2; 
+            
+            this.sortMode = (this.sortMode + 1) % 3; 
+            this.updateSortButtonIcon();
             this.sortHeroHand();
         });
         
         this.cardLayer.addChild(this.sortBtnUI);
+        this.updateSortButtonIcon();
+    }
+
+    private updateSortButtonIcon() {
+        if (!this.sortBtnUI) return;
+        const iconNode = this.sortBtnUI.children[1] as PIXI.Text;
+        if (!iconNode) return;
+
+        if (this.sortMode === 0) iconNode.text = 'O';
+        else if (this.sortMode === 1) iconNode.text = '⚡';
+        else if (this.sortMode === 2) iconNode.text = '🌊';
     }
 
     private getHeroLayout(totalCards: number) {
@@ -351,72 +402,17 @@ export class CachetaPixiEngine {
         const hero = this.gameState.players.find((p: any) => p.isHero);
         if (!hero || !hero.serverCards || hero.serverCards.length === 0) return;
 
-        const suitOrder: Record<string, number> = { '♥': 1, '♠': 2, '♦': 3, '♣': 4 };
-        const rankOrder: Record<string, number> = { 'A': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 11, 'Q': 12, 'K': 13 };
-
-        let wildcardRank = -1;
-        let wildcardSuit = '';
-        if (this.gameState.viraCard) {
-            const vRank = this.gameState.viraCard.slice(0, -1);
-            wildcardSuit = this.gameState.viraCard.slice(-1);
-            const vVal = rankOrder[vRank];
-            wildcardRank = vVal === 13 ? 1 : vVal + 1; 
+        let sortedArray: string[] = [];
+        if (this.sortMode === 1) {
+            sortedArray = CachetaSorter.getSortedCards([...hero.serverCards], this.gameState.viraCard);
+        } else if (this.sortMode === 2) {
+            sortedArray = CachetaSorter.getSortedCardsSequences([...hero.serverCards], this.gameState.viraCard);
+        } else {
+            sortedArray = [...hero.serverCards]; 
         }
 
-        const wildcards: string[] = [];
-        const regularCards: string[] = [];
-
-        hero.serverCards.forEach((c: string) => {
-            const rank = c.slice(0, -1);
-            const suit = c.slice(-1);
-            if (rankOrder[rank] === wildcardRank && suit === wildcardSuit) {
-                wildcards.push(c);
-            } else {
-                regularCards.push(c);
-            }
-        });
-
-        const rankGroups: Record<string, string[]> = {};
-        regularCards.forEach(c => {
-            const rank = c.slice(0, -1);
-            if (!rankGroups[rank]) rankGroups[rank] = [];
-            rankGroups[rank].push(c);
-        });
-
-        const trincas: string[] = [];
-        const pares: string[] = [];
-        const leftovers: string[] = [];
-
-        Object.keys(rankGroups).forEach(rank => {
-            const cards = rankGroups[rank];
-            if (cards.length >= 3) {
-                cards.sort((a, b) => suitOrder[a.slice(-1)] - suitOrder[b.slice(-1)]);
-                trincas.push(...cards);
-            } else if (cards.length === 2) {
-                cards.sort((a, b) => suitOrder[a.slice(-1)] - suitOrder[b.slice(-1)]);
-                pares.push(...cards);
-            } else {
-                leftovers.push(...cards);
-            }
-        });
-
-        leftovers.sort((a, b) => {
-            const rA = a.slice(0, -1);
-            const sA = a.slice(-1);
-            const rB = b.slice(0, -1);
-            const sB = b.slice(-1);
-
-            if (suitOrder[sA] !== suitOrder[sB]) {
-                return suitOrder[sA] - suitOrder[sB];
-            }
-            return rankOrder[rA] - rankOrder[rB];
-        });
-
-        const sortedCards = [...wildcards, ...trincas, ...pares, ...leftovers];
-        hero.serverCards = sortedCards;
-
         const spreadFactor = 32; 
-        const totalCards = hero.serverCards.length;
+        const totalCards = sortedArray.length;
         const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
         const target = this.cardTargets.find(c => c.seat === hero.seat);
         if (!target) return;
@@ -424,7 +420,7 @@ export class CachetaPixiEngine {
         const newHeroCardData: any[] = [];
         const availableSprites = [...this.heroCardData]; 
         
-        hero.serverCards.forEach((cardStr: string, index: number) => {
+        sortedArray.forEach((cardStr: string, index: number) => {
             const spriteIndex = availableSprites.findIndex(c => c.str === cardStr);
             if (spriteIndex !== -1) {
                 const cardData = availableSprites[spriteIndex];
@@ -522,7 +518,14 @@ export class CachetaPixiEngine {
                     continue; 
                 }
 
-                const totalCards = player.serverCards ? player.serverCards.length : 9;
+                let cardsToRender = player.serverCards ? [...player.serverCards] : [];
+                if (this.sortMode === 1 && cardsToRender.length > 0) {
+                    cardsToRender = CachetaSorter.getSortedCards(cardsToRender, this.gameState.viraCard);
+                } else if (this.sortMode === 2 && cardsToRender.length > 0) {
+                    cardsToRender = CachetaSorter.getSortedCardsSequences(cardsToRender, this.gameState.viraCard);
+                }
+
+                const totalCards = cardsToRender.length > 0 ? cardsToRender.length : 9;
                 
                 const layout = this.getHeroLayout(totalCards);
                 const finalScale = layout.scale;
@@ -532,7 +535,7 @@ export class CachetaPixiEngine {
                 const targetY = this.seatCoords[0].y - 112;
 
                 for (let c = 0; c < totalCards; c++) {
-                    const cardStr = player.serverCards ? player.serverCards[c] : "A♠";
+                    const cardStr = cardsToRender.length > 0 ? cardsToRender[c] : "A♠";
                     const rank = cardStr ? (cardStr.slice(0, -1) || "A") : "A";
                     const suit = cardStr ? (cardStr.slice(-1) || "♠") : "♠";
 
@@ -601,6 +604,8 @@ export class CachetaPixiEngine {
         if (this.isDealingCardsAnimationRunning) return;
         this.callbacks.setDealing(true);
         this.callbacks.setAnimating(true); 
+        this.sortMode = 0; 
+        if(this.sortBtnUI) this.updateSortButtonIcon();
         
         try {
             this.resetAvatars();
@@ -881,84 +886,7 @@ export class CachetaPixiEngine {
     public showWinnerCards(winnerSeat: number, rawCards: string[]) {
         if (!this.app || !this.deckInstance || !rawCards) return;
 
-        const suitOrder: Record<string, number> = { '♥': 1, '♠': 2, '♦': 3, '♣': 4 };
-        const rankOrder: Record<string, number> = { 'A': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 11, 'Q': 12, 'K': 13 };
-
-        let wildcardRank = -1;
-        let wildcardSuit = '';
-        if (this.gameState.viraCard) {
-            const vRank = this.gameState.viraCard.slice(0, -1);
-            wildcardSuit = this.gameState.viraCard.slice(-1);
-            const vVal = rankOrder[vRank];
-            wildcardRank = vVal === 13 ? 1 : vVal + 1; 
-        }
-
-        const wildcards: string[] = [];
-        const regularCards: string[] = [];
-
-        rawCards.forEach((c: string) => {
-            const rank = c.slice(0, -1);
-            const suit = c.slice(-1);
-            if (rankOrder[rank] === wildcardRank && suit === wildcardSuit) {
-                wildcards.push(c);
-            } else {
-                regularCards.push(c);
-            }
-        });
-
-        const sequences: string[][] = [];
-        ['♥', '♠', '♦', '♣'].forEach(suit => {
-            let suitCards = regularCards.filter(c => c.slice(-1) === suit);
-            suitCards.sort((a, b) => rankOrder[a.slice(0, -1)] - rankOrder[b.slice(0, -1)]);
-            let run: string[] = [];
-            for (let i = 0; i < suitCards.length; i++) {
-                if (run.length === 0) { run.push(suitCards[i]); } 
-                else {
-                    let lastRank = rankOrder[run[run.length - 1].slice(0, -1)];
-                    let currRank = rankOrder[suitCards[i].slice(0, -1)];
-                    if (currRank === lastRank + 1) { run.push(suitCards[i]); } 
-                    else if (currRank === lastRank) { continue; } 
-                    else {
-                        if (run.length >= 3) {
-                            sequences.push([...run]);
-                            run.forEach(c => { let idx = regularCards.indexOf(c); if(idx > -1) regularCards.splice(idx, 1); });
-                        }
-                        run = [suitCards[i]];
-                    }
-                }
-            }
-            if (run.length >= 3) {
-                sequences.push([...run]);
-                run.forEach(c => { let idx = regularCards.indexOf(c); if(idx > -1) regularCards.splice(idx, 1); });
-            }
-        });
-
-        const trincas: string[][] = [];
-        const rankGroups: Record<string, string[]> = {};
-        regularCards.forEach(c => {
-            const rank = c.slice(0, -1);
-            if (!rankGroups[rank]) rankGroups[rank] = [];
-            rankGroups[rank].push(c);
-        });
-        Object.keys(rankGroups).forEach(rank => {
-            if (rankGroups[rank].length >= 3) {
-                trincas.push([...rankGroups[rank]]);
-                rankGroups[rank].forEach(c => { let idx = regularCards.indexOf(c); if(idx > -1) regularCards.splice(idx, 1); });
-            }
-        });
-
-        regularCards.sort((a, b) => {
-            let rA = rankOrder[a.slice(0, -1)];
-            let rB = rankOrder[b.slice(0, -1)];
-            if (rA !== rB) return rA - rB;
-            return suitOrder[a.slice(-1)] - suitOrder[b.slice(-1)];
-        });
-
-        const groups: string[][] = [];
-        if (wildcards.length > 0) groups.push(wildcards);
-        sequences.forEach(s => groups.push(s));
-        trincas.forEach(t => groups.push(t));
-        if (regularCards.length > 0) groups.push(regularCards); 
+        const groups = CachetaSorter.getWinningGroups([...rawCards], this.gameState.viraCard);
 
         const centerX = this.app.screen.width / 2;
         const centerY = this.app.screen.height / 2;

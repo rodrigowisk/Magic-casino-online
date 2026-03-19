@@ -12,7 +12,7 @@
       
       <form @submit.prevent="fazerLogin" class="auth-form">
         <div class="input-group">
-          <label>Nome de Usuário</label>
+          <label>Usuário</label>
           <input 
             type="text" 
             v-model="username" 

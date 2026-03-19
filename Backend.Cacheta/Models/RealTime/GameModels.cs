@@ -63,4 +63,5 @@ public class PlayerState
     // True: Ele já puxou do lixo ou do monte (agora precisa descartar)
     // False: É o começo do turno dele (precisa escolher de onde vai comprar)
     public bool HasDrawnThisTurn { get; set; } = false;
+    public bool HasFurou { get; set; } = false;
 }

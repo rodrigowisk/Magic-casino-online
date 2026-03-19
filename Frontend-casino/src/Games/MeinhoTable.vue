@@ -851,7 +851,7 @@ onMounted(async () => {
 
   setTimeout(() => {
     isAppLoading.value = false;
-  }, 2800);
+  }, 500);
 });
 
 onUnmounted(() => {

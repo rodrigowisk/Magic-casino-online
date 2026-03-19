@@ -127,6 +127,7 @@ public class GameManager
                 {
                     p.Cards.Clear();
                     p.HasDrawnThisTurn = false;
+                    p.HasFurou = false; // 👇 ZERA A PUNIÇÃO DE FURO PRA NOVA RODADA 👇
 
                     if (p.LeaveNextHand)
                     {
@@ -156,7 +157,6 @@ public class GameManager
                     }
                     else if (p.IsSeated)
                     {
-                        // Todos os sentados vão para WAITING e precisam confirmar o "Continuar"
                         p.Status = "waiting";
                     }
                 }
@@ -169,7 +169,6 @@ public class GameManager
 
             if (cashoutTasks.Any()) await Task.WhenAll(cashoutTasks);
 
-            // Atualiza a mesa para waiting e pede ao frontend para mostrar o botão de Continuar
             var finalWaitingState = GetOrCreateTable(tableId);
             await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", finalWaitingState);
             await hubContext.Clients.Group(tableId).SendAsync("PromptNextRound");
@@ -358,7 +357,7 @@ public class GameManager
             player.TotalBuyIn += buyIn;
             player.LastChips = 0;
             player.IsSeated = true;
-            player.Status = "ready"; // Já senta com status READY para a próxima mão
+            player.Status = "ready";
             player.LeaveNextHand = false;
             player.LastActiveAt = DateTime.UtcNow;
             return true;
@@ -387,7 +386,7 @@ public class GameManager
             player.Chips += amount;
             player.TotalBuyIn += amount;
             player.LastActiveAt = DateTime.UtcNow;
-            player.Status = "ready"; // Ao comprar mais fichas, fica pronto.
+            player.Status = "ready";
             return true;
         }
     }
@@ -474,7 +473,6 @@ public class GameManager
         {
             bool chargeAnte = table.Pot <= 0;
 
-            // Só começa se tiverem 2 ou mais jogadores no status READY
             var eligiblePlayers = table.Players.Where(p =>
                 p.IsSeated && p.Chips > 0 && p.Status == "ready" && (!chargeAnte || p.Chips >= table.MinBet)
             ).OrderBy(p => p.Seat).ToList();
@@ -509,6 +507,7 @@ public class GameManager
                     p.Status = "playing";
                     p.LastActiveAt = DateTime.UtcNow;
                     p.HasDrawnThisTurn = false;
+                    p.HasFurou = false; // Zera por precaução
                 }
 
                 table.ViraCard = deck[0];
@@ -544,6 +543,9 @@ public class GameManager
             if (fromDiscard)
             {
                 if (table.DiscardPile.Count == 0) return false;
+
+                // 👇 BLOQUEIA A COMPRA DO LIXO SE O JOGADOR DEU UMA "FURADA" 👇
+                if (player.HasFurou) return false;
 
                 string drawnCard = table.DiscardPile.Last();
                 table.DiscardPile.RemoveAt(table.DiscardPile.Count - 1);
@@ -613,11 +615,13 @@ public class GameManager
         }
     }
 
-    public bool DeclareWin(string tableId, string connectionId, string? cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups)
+    // 👇 RETORNA UMA STRING PARA DIZER SE "FUROU" 👇
+    public string DeclareWin(string tableId, string connectionId, string? cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups, out List<string> handCards)
     {
         seat = -1;
         playerName = string.Empty;
         winningGroups = new List<List<string>>();
+        handCards = new List<string>();
         var table = GetOrCreateTable(tableId);
 
         lock (table.Players)
@@ -625,7 +629,7 @@ public class GameManager
             var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
 
             if (player == null || table.CurrentTurnSeat < 0 || player.Seat != table.CurrentTurnSeat || player.Status != "playing")
-                return false;
+                return "Invalid";
 
             var handToValidate = new List<string>(player.Cards);
             if (!string.IsNullOrEmpty(cardToDiscard) && handToValidate.Contains(cardToDiscard))
@@ -633,12 +637,31 @@ public class GameManager
                 handToValidate.Remove(cardToDiscard);
             }
 
-            // O Motor C# de Backtracking que previne completamente o "bater furado"
             if (!ValidateCachetaHand(handToValidate, table.ViraCard, out winningGroups))
             {
-                return false;
+                // 👇 AQUI ACONTECE A FURADA 👇
+                player.HasFurou = true;
+
+                if (!string.IsNullOrEmpty(cardToDiscard) && player.Cards.Contains(cardToDiscard))
+                {
+                    player.Cards.Remove(cardToDiscard);
+                    table.DiscardPile.Add(cardToDiscard);
+                }
+
+                seat = player.Seat;
+                playerName = player.Name;
+                handCards = new List<string>(player.Cards); // Envia as cartas dele para mostrar
+
+                player.HasDrawnThisTurn = false;
+                player.LastActiveAt = DateTime.UtcNow;
+
+                AdvanceTurn(table);
+                table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
+
+                return "Furo";
             }
 
+            // 👇 BATIDA VERDADEIRA 👇
             if (!string.IsNullOrEmpty(cardToDiscard) && player.Cards.Contains(cardToDiscard))
             {
                 player.Cards.Remove(cardToDiscard);
@@ -654,7 +677,7 @@ public class GameManager
             table.CurrentTurnSeat = -1;
             table.TurnEndTime = null;
 
-            return true;
+            return "Win";
         }
     }
 
@@ -674,10 +697,6 @@ public class GameManager
         table.CurrentTurnSeat = -1;
         return true;
     }
-
-    // =========================================================================
-    // 👇 MOTOR MATEMÁTICO BLINDADO DE CACHETA/RUMMY 👇
-    // =========================================================================
 
     private int GetRankValue(string rankStr)
     {
@@ -711,109 +730,180 @@ public class GameManager
         var wildcards = hand.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) == wildcardRank).ToList();
         var normals = hand.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) != wildcardRank).ToList();
 
-        return BacktrackCacheta(normals, wildcards.Count, new List<List<string>>(), out winningGroups, wildcards);
+        var possibleGroups = GenerateAllPossibleGroups(normals, wildcards.Count);
+
+        return FindValidCombination(possibleGroups, normals.Count + wildcards.Count, wildcards.Count, out winningGroups, wildcards);
     }
 
-    private bool BacktrackCacheta(List<string> normals, int wildcardsLeft, List<List<string>> currentGroups, out List<List<string>> finalGroups, List<string> actualWildcards)
+    private List<List<string>> GenerateAllPossibleGroups(List<string> normals, int availableWildcards)
     {
-        finalGroups = currentGroups;
-        if (normals.Count == 0)
+        var groups = new List<List<string>>();
+        var distinctNormals = normals.Distinct().ToList();
+
+        var groupedByRank = distinctNormals.GroupBy(c => GetRankValue(c.Substring(0, c.Length - 1)));
+        foreach (var group in groupedByRank)
         {
-            if (currentGroups.Count == 3)
+            var cardsOfRank = group.ToList();
+            int maxPossibleWithWildcards = cardsOfRank.Count + availableWildcards;
+
+            if (maxPossibleWithWildcards >= 3)
             {
-                finalGroups = new List<List<string>>(currentGroups);
-                int wIndex = actualWildcards.Count - wildcardsLeft;
-                for (int i = 0; i < wildcardsLeft; i++) finalGroups[0].Add(actualWildcards[wIndex + i]);
+                for (int size = 3; size <= Math.Min(4, maxPossibleWithWildcards); size++)
+                {
+                    var combinations = GetCombinations(cardsOfRank, Math.Min(cardsOfRank.Count, size));
+                    foreach (var combo in combinations)
+                    {
+                        if (combo.Count <= size && combo.Count + availableWildcards >= size)
+                        {
+                            groups.Add(combo);
+                        }
+                    }
+                }
+            }
+        }
+
+        var groupedBySuit = distinctNormals.GroupBy(c => c.Last());
+        foreach (var group in groupedBySuit)
+        {
+            var cardsOfSuit = group.OrderBy(c => GetRankValue(c.Substring(0, c.Length - 1))).ToList();
+
+            var hasAce = cardsOfSuit.Any(c => GetRankValue(c.Substring(0, c.Length - 1)) == 1);
+            var extendedCards = new List<string>(cardsOfSuit);
+            if (hasAce)
+            {
+                var aceCard = cardsOfSuit.First(c => GetRankValue(c.Substring(0, c.Length - 1)) == 1);
+                extendedCards.Add(aceCard);
+            }
+
+            for (int i = 0; i < extendedCards.Count; i++)
+            {
+                for (int size = 3; size <= 4; size++)
+                {
+                    var sequenceCards = new List<string>();
+                    int wildcardsNeeded = 0;
+                    int currentRank = GetRankValue(extendedCards[i].Substring(0, extendedCards[i].Length - 1));
+
+                    if (i == extendedCards.Count - 1 && GetRankValue(extendedCards[i].Substring(0, extendedCards[i].Length - 1)) == 1)
+                        currentRank = 14;
+
+                    bool validSequence = true;
+
+                    for (int j = 0; j < size; j++)
+                    {
+                        int targetRank = currentRank + j;
+                        string targetRankStr = targetRank == 14 ? "A" : targetRank.ToString();
+                        if (targetRank == 11) targetRankStr = "J";
+                        if (targetRank == 12) targetRankStr = "Q";
+                        if (targetRank == 13) targetRankStr = "K";
+
+                        var nextCard = extendedCards.FirstOrDefault(c =>
+                            (GetRankValue(c.Substring(0, c.Length - 1)) == targetRank || (targetRank == 14 && GetRankValue(c.Substring(0, c.Length - 1)) == 1))
+                            && c.Last() == group.Key);
+
+                        if (nextCard != null && !sequenceCards.Contains(nextCard))
+                        {
+                            sequenceCards.Add(nextCard);
+                        }
+                        else
+                        {
+                            wildcardsNeeded++;
+                        }
+                    }
+
+                    if (wildcardsNeeded <= availableWildcards && sequenceCards.Count > 0)
+                    {
+                        groups.Add(sequenceCards);
+                    }
+                }
+            }
+        }
+
+        return groups.Distinct(new ListComparer()).ToList();
+    }
+
+    private bool FindValidCombination(List<List<string>> possibleGroups, int totalCards, int totalWildcards, out List<List<string>> winningGroups, List<string> actualWildcards)
+    {
+        winningGroups = new List<List<string>>();
+        int targetGroupsCount = totalCards == 9 ? 3 : 3;
+
+        var combinations = GetCombinations(possibleGroups, targetGroupsCount);
+
+        foreach (var combo in combinations)
+        {
+            var usedCards = new HashSet<string>();
+            int wildcardsNeeded = 0;
+            bool isValid = true;
+
+            foreach (var group in combo)
+            {
+                foreach (var card in group)
+                {
+                    if (!usedCards.Add(card))
+                    {
+                        isValid = false;
+                        break;
+                    }
+                }
+                if (!isValid) break;
+
+                int expectedSize = Math.Max(3, group.Count);
+                if (group.Count < 3) expectedSize = 3;
+
+                wildcardsNeeded += (expectedSize - group.Count);
+            }
+
+            if (isValid && wildcardsNeeded == totalWildcards && usedCards.Count + wildcardsNeeded == totalCards)
+            {
+                winningGroups = new List<List<string>>();
+                int wildcardIndex = 0;
+                foreach (var group in combo)
+                {
+                    var finalGroup = new List<string>(group);
+                    int expectedSize = Math.Max(3, group.Count);
+                    while (finalGroup.Count < expectedSize && wildcardIndex < actualWildcards.Count)
+                    {
+                        finalGroup.Add(actualWildcards[wildcardIndex]);
+                        wildcardIndex++;
+                    }
+                    winningGroups.Add(finalGroup);
+                }
                 return true;
             }
-            return false;
         }
-
-        if (currentGroups.Count >= 3) return false;
-
-        var firstCard = normals[0];
-        string rankStr = firstCard.Substring(0, firstCard.Length - 1);
-        char suit = firstCard.Last();
-        int rankVal = GetRankValue(rankStr);
-
-        // 1. Trinca/Quadra (Mesmo número, Naipes OBRIGATORIAMENTE diferentes)
-        var sameRankCards = normals.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) == rankVal)
-                                   .GroupBy(c => c.Last()).Select(g => g.First()).Take(4).ToList();
-
-        for (int size = 3; size <= 4; size++)
-        {
-            for (int wUse = 0; wUse <= wildcardsLeft && wUse <= size - 1; wUse++)
-            {
-                int neededNormal = size - wUse;
-                if (sameRankCards.Count >= neededNormal && sameRankCards.Contains(firstCard))
-                {
-                    var group = sameRankCards.Take(neededNormal).ToList();
-                    if (!group.Contains(firstCard))
-                    {
-                        group.RemoveAt(group.Count - 1);
-                        group.Add(firstCard);
-                    }
-
-                    var remainingNormals = new List<string>(normals);
-                    foreach (var c in group) remainingNormals.Remove(c);
-
-                    var newGroups = new List<List<string>>(currentGroups);
-                    var fullGroup = new List<string>(group);
-                    for (int i = 0; i < wUse; i++) fullGroup.Add(actualWildcards[actualWildcards.Count - wildcardsLeft + i]);
-                    newGroups.Add(fullGroup);
-
-                    if (BacktrackCacheta(remainingNormals, wildcardsLeft - wUse, newGroups, out finalGroups, actualWildcards))
-                        return true;
-                }
-            }
-        }
-
-        // 2. Sequência (Mesmo Naipe, em ordem, sem repetir a mesma carta)
-        var sameSuitCards = normals.Where(c => c.Last() == suit)
-                                   .GroupBy(c => GetRankValue(c.Substring(0, c.Length - 1)))
-                                   .Select(g => g.First()).ToList();
-
-        for (int startOffset = 0; startOffset <= 3; startOffset++)
-        {
-            int startRank = rankVal - startOffset;
-            if (startRank < 1) continue;
-
-            for (int size = 3; size <= 4; size++)
-            {
-                if (startOffset >= size) continue;
-
-                for (int wUse = 0; wUse <= wildcardsLeft && wUse <= size - 1; wUse++)
-                {
-                    var group = new List<string>();
-                    int currentW = wUse;
-                    for (int i = 0; i < size; i++)
-                    {
-                        int targetRank = startRank + i;
-                        int searchRank = targetRank == 14 ? 1 : targetRank; // Permite sequência com Ás no final (Q K A)
-                        var card = sameSuitCards.FirstOrDefault(c => GetRankValue(c.Substring(0, c.Length - 1)) == searchRank);
-
-                        if (card != null) group.Add(card);
-                        else if (currentW > 0) currentW--;
-                        else break;
-                    }
-
-                    if (group.Count + (wUse - currentW) == size && group.Contains(firstCard))
-                    {
-                        var remainingNormals = new List<string>(normals);
-                        foreach (var c in group) remainingNormals.Remove(c);
-
-                        var newGroups = new List<List<string>>(currentGroups);
-                        var fullGroup = new List<string>(group);
-                        for (int i = 0; i < (wUse - currentW); i++) fullGroup.Add(actualWildcards[actualWildcards.Count - wildcardsLeft + i]);
-                        newGroups.Add(fullGroup);
-
-                        if (BacktrackCacheta(remainingNormals, wildcardsLeft - (wUse - currentW), newGroups, out finalGroups, actualWildcards))
-                            return true;
-                    }
-                }
-            }
-        }
-
         return false;
+    }
+
+    private List<List<T>> GetCombinations<T>(List<T> list, int length)
+    {
+        if (length == 1) return list.Select(t => new List<T> { t }).ToList();
+        var result = new List<List<T>>();
+        for (int i = 0; i < list.Count; i++)
+        {
+            var head = list[i];
+            var tail = list.Skip(i + 1).ToList();
+            foreach (var combination in GetCombinations(tail, length - 1))
+            {
+                combination.Insert(0, head);
+                result.Add(combination);
+            }
+        }
+        return result;
+    }
+
+    private class ListComparer : IEqualityComparer<List<string>>
+    {
+        public bool Equals(List<string>? x, List<string>? y)
+        {
+            if (x == null || y == null) return x == y;
+            if (x.Count != y.Count) return false;
+            return x.OrderBy(c => c).SequenceEqual(y.OrderBy(c => c));
+        }
+
+        public int GetHashCode(List<string> obj)
+        {
+            int hash = 19;
+            foreach (var item in obj.OrderBy(c => c)) hash = hash * 31 + item.GetHashCode();
+            return hash;
+        }
     }
 }

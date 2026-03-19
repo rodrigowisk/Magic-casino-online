@@ -4,8 +4,9 @@ export interface CachetaHubCallbacks {
     onReceiveTableState: (serverState: any) => void;
     onWalletBalanceUpdated?: (newBalance: number) => void; 
     onPlayerWon?: (data: { seat: number, name: string, groups: string[][] }) => void; 
-    // 👇 NOVO EVENTO 👇
     onPromptNextRound?: () => void;
+    // 👇 NOVO EVENTO 👇
+    onPlayerFurou?: (data: { seat: number, name: string, cards: string[] }) => void;
 }
 
 export function useCachetaHub(tableId: string, currentUserId: string, currentUserName: string, currentUserAvatar: string, callbacks: CachetaHubCallbacks) {
@@ -33,9 +34,13 @@ export function useCachetaHub(tableId: string, currentUserId: string, currentUse
                 if (callbacks.onPlayerWon) callbacks.onPlayerWon(data);
             });
 
-            // 👇 NOVO LISTENER 👇
             hubConnection.on("PromptNextRound", () => {
                 if (callbacks.onPromptNextRound) callbacks.onPromptNextRound();
+            });
+
+            // 👇 ESCUTANDO O FURO DO SERVIDOR 👇
+            hubConnection.on("PlayerFurou", (data: any) => {
+                if (callbacks.onPlayerFurou) callbacks.onPlayerFurou(data);
             });
 
             await hubConnection.start();
@@ -85,7 +90,6 @@ export function useCachetaHub(tableId: string, currentUserId: string, currentUse
         if (hubConnection) await hubConnection.invoke("DeclareWin", tableId, cardString || "");
     };
 
-    // 👇 NOVA AÇÃO DE CONTINUAR 👇
     const readyForNextRound = async () => {
         if (hubConnection) await hubConnection.invoke("ReadyForNextRound", tableId);
     };

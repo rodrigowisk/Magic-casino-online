@@ -4,9 +4,9 @@
     <div class="action-buttons" v-if="!hasDrawnThisTurn">
       <button 
         class="action-btn lixo-btn" 
-        :disabled="!canDrawFromDiscard"
+        :disabled="!canDrawFromDiscard || hasFurou"
         @click="$emit('draw', true)"
-        title="Comprar a carta aberta no lixo"
+        :title="hasFurou ? 'Você furou e só pode comprar do monte!' : 'Comprar a carta aberta no lixo'"
       >
         COMPRAR LIXO
       </button>
@@ -53,6 +53,7 @@ const props = defineProps<{
   hasDrawnThisTurn: boolean;
   canDrawFromDiscard: boolean;
   selectedCard: string | null; 
+  hasFurou: boolean;
 }>();
 
 defineEmits(['draw', 'discard', 'declareWin']);
@@ -124,7 +125,6 @@ defineEmits(['draw', 'discard', 'declareWin']);
   border: 1px solid #1a5276;
 }
 
-/* 👇 ESTILO DO BOTÃO DE BATER 👇 */
 .bater-btn {
   background: linear-gradient(135deg, #ff0055, #ffaa00);
   border: 1px solid #ff0055;

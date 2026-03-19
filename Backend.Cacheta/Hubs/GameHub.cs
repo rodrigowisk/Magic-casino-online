@@ -5,6 +5,7 @@ using Backend.Cacheta.Models.RealTime;
 using System.Security.Claims;
 using System.Threading.Tasks;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace Backend.Cacheta.Hubs;
@@ -101,7 +102,6 @@ public class GameHub : Hub
         else await Clients.Caller.SendAsync("ReceiveError", "Falha no rebuy. Verifique o seu saldo.");
     }
 
-    // 👇 NOVA FUNÇÃO: O FRONTEND CHAMA ISSO QUANDO O JOGADOR CLICA EM "CONTINUAR" 👇
     public async Task ReadyForNextRound(string tableId)
     {
         if (_gameManager.SetPlayerReady(tableId, Context.ConnectionId))
@@ -135,7 +135,7 @@ public class GameHub : Hub
             var tableState = _gameManager.GetOrCreateTable(tableId);
             await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
         }
-        else await Clients.Caller.SendAsync("ReceiveError", "Não é o seu turno ou movimento inválido.");
+        else await Clients.Caller.SendAsync("ReceiveError", "Não é o seu turno, movimento inválido ou você furou na rodada e não pode comprar do lixo.");
     }
 
     public async Task DiscardCard(string tableId, string cardString)
@@ -150,22 +150,27 @@ public class GameHub : Hub
         else await Clients.Caller.SendAsync("ReceiveError", "Movimento inválido. Você deve comprar antes de descartar.");
     }
 
+    // 👇 DECLARE WIN AGORA TRATA VITÓRIA OU FURO 👇
     public async Task DeclareWin(string tableId, string cardToDiscard)
     {
-        var connectionId = Context.ConnectionId;
+        string result = _gameManager.DeclareWin(tableId, Context.ConnectionId, cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups, out List<string> handCards);
 
-        if (_gameManager.DeclareWin(tableId, connectionId, cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups))
+        if (result == "Win")
         {
             var table = _gameManager.GetOrCreateTable(tableId);
             await Clients.Group(tableId).SendAsync("TableStateUpdated", table);
-
             await Clients.Group(tableId).SendAsync("PlayerWon", new { Seat = seat, Name = playerName, Groups = winningGroups });
-
             _ = Task.Run(() => _gameManager.ProcessNextRoundLoop(tableId, true, 8000));
+        }
+        else if (result == "Furo")
+        {
+            var table = _gameManager.GetOrCreateTable(tableId);
+            await Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+            await Clients.Group(tableId).SendAsync("PlayerFurou", new { Seat = seat, Name = playerName, Cards = handCards });
         }
         else
         {
-            await Clients.Caller.SendAsync("ReceiveError", "Batida Recusada! Você não tem 3 jogos prontos na mão.");
+            await Clients.Caller.SendAsync("ReceiveError", "Movimento inválido.");
         }
     }
 
