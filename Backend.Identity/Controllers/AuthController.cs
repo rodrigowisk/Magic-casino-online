@@ -1,7 +1,7 @@
 ﻿using Backend.Identity.Data;
 using Backend.Identity.DTOs;
 using Backend.Identity.Models;
-using Microsoft.AspNetCore.Authorization; // 👇 Importação Necessária
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -11,7 +11,6 @@ using System.Text;
 
 namespace Backend.Identity.Controllers;
 
-// 👇 DTO Auxiliar para receber apenas a string do novo Avatar
 public class UpdateAvatarDto
 {
     public string Avatar { get; set; } = string.Empty;
@@ -38,6 +37,18 @@ public class AuthController : ControllerBase
             return BadRequest(new { message = "Email ou Username já estão em uso." });
         }
 
+        Guid? referredById = null;
+
+        // 👇 LÓGICA DO AFILIADO: Verifica se veio um código e se ele é válido
+        if (!string.IsNullOrWhiteSpace(request.ReferralCode))
+        {
+            var agent = await _context.Agents.FirstOrDefaultAsync(a => a.ReferralCode == request.ReferralCode && a.IsActive);
+            if (agent != null)
+            {
+                referredById = agent.UserId;
+            }
+        }
+
         string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
         var user = new User
@@ -47,10 +58,11 @@ public class AuthController : ControllerBase
             Email = request.Email,
             Phone = request.Phone,
             PasswordHash = passwordHash,
-            Avatar = "default.webp", // Define o avatar padrão ao criar a conta
+            Avatar = "default.webp",
             CreatedAt = DateTime.UtcNow,
             UpdatedAt = DateTime.UtcNow,
-            IsActive = true
+            IsActive = true,
+            ReferredBy = referredById // Grava quem indicou
         };
 
         _context.Users.Add(user);
@@ -77,17 +89,15 @@ public class AuthController : ControllerBase
         {
             token,
             username = user.Username,
-            userId = user.Id, 
+            userId = user.Id,
             avatar = user.Avatar
         });
     }
 
-    // 👇 NOVO ENDPOINT: Atualiza o Avatar no Banco de Dados 👇
     [HttpPut("avatar")]
-    [Authorize] // Exige que o usuário passe o JWT no Header
+    [Authorize]
     public async Task<IActionResult> UpdateAvatar([FromBody] UpdateAvatarDto request)
     {
-        // Pega o ID do usuário diretamente do Token JWT
         var userIdString = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
         if (string.IsNullOrEmpty(userIdString) || !Guid.TryParse(userIdString, out Guid userId))

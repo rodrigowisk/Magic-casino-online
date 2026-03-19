@@ -2,8 +2,10 @@ import * as signalR from '@microsoft/signalr';
 
 export interface CachetaHubCallbacks {
     onReceiveTableState: (serverState: any) => void;
-    // Evento para receber o saldo atualizado da carteira
     onWalletBalanceUpdated?: (newBalance: number) => void; 
+    onPlayerWon?: (data: { seat: number, name: string, groups: string[][] }) => void; 
+    // 👇 NOVO EVENTO 👇
+    onPromptNextRound?: () => void;
 }
 
 export function useCachetaHub(tableId: string, currentUserId: string, currentUserName: string, currentUserAvatar: string, callbacks: CachetaHubCallbacks) {
@@ -11,7 +13,6 @@ export function useCachetaHub(tableId: string, currentUserId: string, currentUse
 
     const connect = async () => {
         try {
-            // 👇 Aponta para o novo servidor da Cacheta (Porta 5003)
             const CACHETA_API_URL = import.meta.env.VITE_CACHETA_API_URL || 'http://localhost:5003';
             
             hubConnection = new signalR.HubConnectionBuilder()
@@ -21,15 +22,20 @@ export function useCachetaHub(tableId: string, currentUserId: string, currentUse
                 .withAutomaticReconnect()
                 .build();
 
-            // Mapeando os eventos de atualização de estado geral do servidor
             hubConnection.on("ReceiveTableState", callbacks.onReceiveTableState);
             hubConnection.on("TableStateUpdated", callbacks.onReceiveTableState);
 
-            // Escuta a atualização do saldo vinda do SignalR
             hubConnection.on("WalletBalanceUpdated", (newBalance: number) => {
-                if (callbacks.onWalletBalanceUpdated) {
-                    callbacks.onWalletBalanceUpdated(newBalance);
-                }
+                if (callbacks.onWalletBalanceUpdated) callbacks.onWalletBalanceUpdated(newBalance);
+            });
+
+            hubConnection.on("PlayerWon", (data: any) => {
+                if (callbacks.onPlayerWon) callbacks.onPlayerWon(data);
+            });
+
+            // 👇 NOVO LISTENER 👇
+            hubConnection.on("PromptNextRound", () => {
+                if (callbacks.onPromptNextRound) callbacks.onPromptNextRound();
             });
 
             await hubConnection.start();
@@ -40,73 +46,52 @@ export function useCachetaHub(tableId: string, currentUserId: string, currentUse
     };
 
     const disconnect = () => {
-        if (hubConnection) {
-            hubConnection.stop();
-        }
+        if (hubConnection) hubConnection.stop();
     };
 
     const getConnectionId = () => {
         return hubConnection?.connectionId;
     };
 
-    // --- AÇÕES GERAIS DA MESA ---
-
     const updateAvatar = async (newAvatar: string) => {
-        if (hubConnection) {
-            await hubConnection.invoke("UpdateAvatar", tableId, newAvatar);
-        }
+        if (hubConnection) await hubConnection.invoke("UpdateAvatar", tableId, newAvatar);
     };
 
     const sitDown = async (logicalSeat: number, buyIn: number) => {
-        if (hubConnection) {
-            await hubConnection.invoke("SitDown", tableId, logicalSeat, buyIn, currentUserId);
-        }
+        if (hubConnection) await hubConnection.invoke("SitDown", tableId, logicalSeat, buyIn, currentUserId);
     };
 
     const rebuy = async (amount: number) => {
-        if (hubConnection) {
-            await hubConnection.invoke("Rebuy", tableId, amount);
-        }
+        if (hubConnection) await hubConnection.invoke("Rebuy", tableId, amount);
     };
 
     const standUp = async () => {
-        if (hubConnection) {
-            await hubConnection.invoke("StandUp", tableId);
-        }
+        if (hubConnection) await hubConnection.invoke("StandUp", tableId);
     };
 
     const setLeaveNextHand = async (willLeave: boolean) => {
-        if (hubConnection) {
-            await hubConnection.invoke("SetLeaveNextHand", tableId, willLeave);
-        }
+        if (hubConnection) await hubConnection.invoke("SetLeaveNextHand", tableId, willLeave);
     };
 
-    // --- 👇 AÇÕES EXCLUSIVAS DA CACHETA 👇 ---
-
-    // fromDiscard = true (compra do lixo aberto), fromDiscard = false (compra do monte fechado)
     const drawCard = async (fromDiscard: boolean) => {
-        if (hubConnection) {
-            await hubConnection.invoke("DrawCard", tableId, fromDiscard);
-        }
+        if (hubConnection) await hubConnection.invoke("DrawCard", tableId, fromDiscard);
     };
 
-    // cardString = ex: "A♥", "10♣"
     const discardCard = async (cardString: string) => {
-        if (hubConnection) {
-            await hubConnection.invoke("DiscardCard", tableId, cardString);
-        }
+        if (hubConnection) await hubConnection.invoke("DiscardCard", tableId, cardString);
+    };
+
+    const declareWin = async (cardString: string | null) => {
+        if (hubConnection) await hubConnection.invoke("DeclareWin", tableId, cardString || "");
+    };
+
+    // 👇 NOVA AÇÃO DE CONTINUAR 👇
+    const readyForNextRound = async () => {
+        if (hubConnection) await hubConnection.invoke("ReadyForNextRound", tableId);
     };
 
     return {
-        connect,
-        disconnect,
-        getConnectionId,
-        updateAvatar,
-        sitDown,
-        rebuy,
-        standUp,
-        setLeaveNextHand,
-        drawCard,
-        discardCard
+        connect, disconnect, getConnectionId, updateAvatar, sitDown, rebuy, standUp, 
+        setLeaveNextHand, drawCard, discardCard, declareWin, readyForNextRound
     };
 }

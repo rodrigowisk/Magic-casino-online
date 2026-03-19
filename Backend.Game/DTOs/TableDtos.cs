@@ -1,7 +1,6 @@
 ﻿using System;
 using System.ComponentModel.DataAnnotations;
 
-// 👇 A correção está aqui: Voltamos para o namespace do Meinho (Game)
 namespace Backend.Game.DTOs;
 
 public class CreateTableDto
@@ -34,6 +33,9 @@ public class CreateTableDto
     public string GameType { get; set; } = string.Empty;
 
     public string? Password { get; set; }
+
+    // 👇 NOVO: Recebe a imagem da capa do Vue
+    public string CoverImage { get; set; } = "casino.webp";
 }
 
 public class TableResponseDto
@@ -53,6 +55,9 @@ public class TableResponseDto
     public string GameType { get; set; } = string.Empty;
 
     public bool HasPassword { get; set; }
+
+    // 👇 NOVO: Devolve a imagem da capa para o Lobby do Vue
+    public string CoverImage { get; set; } = string.Empty;
 }
 
 public class ValidatePasswordDto

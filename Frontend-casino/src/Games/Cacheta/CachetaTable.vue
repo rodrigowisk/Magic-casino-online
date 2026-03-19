@@ -33,6 +33,11 @@
         </svg>
       </button>
       
+      <div class="winner-banner" v-if="winnerName">
+        <h2>🏆 BATEU! 🏆</h2>
+        <p>O jogador <strong>{{ winnerName }}</strong> venceu a rodada!</p>
+      </div>
+
       <div class="ui-layer">
         <div class="controls-wrapper" v-if="gameState.phase === 'betting' && !isDealing && !isAnimating && gameState.players[gameState.currentTurn]?.isHero && gameState.players[gameState.currentTurn]?.status === 'playing'">
           <CachetaControls 
@@ -42,6 +47,10 @@
             @draw="(fromDiscard) => cachetaHub.drawCard(fromDiscard)"
             @discard="(cardStr) => {
               cachetaHub.discardCard(cardStr);
+              selectedCardToDiscard = null;
+            }"
+            @declareWin="(cardStr) => {
+              cachetaHub.declareWin(cardStr);
               selectedCardToDiscard = null;
             }"
           />
@@ -63,7 +72,7 @@
         v-if="showRebuyModal"
         :minBuyIn="gameState.tableMinBuyIn"
         :maxBalance="userTotalBalance"
-        @cancel="invokeStandUp"
+        @cancel="handleRebuyCancel"
         @confirm="invokeRebuy"
       />
 
@@ -93,8 +102,6 @@
         @update:isOpen="showStatsModal = $event"
       />
 
-      <BottomNav class="game-bottom-nav" />
-
     </div>
 
     <div class="table-id-footer">
@@ -108,7 +115,6 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router'; 
 
-// 👇 Corrigido: Volta apenas 2 pastas (../../) para chegar ao src/
 import { CachetaPixiEngine } from '../../Game/Cacheta/CachetaPixiEngine';
 import { useCachetaHub } from '../../composables/useCachetaHub';
 
@@ -154,6 +160,7 @@ const sessionHandHistory = ref<any[]>([]);
 const animModeEnabled = ref(localStorage.getItem('magic_anim_enabled') !== '0'); 
 
 const selectedCardToDiscard = ref<string | null>(null);
+const winnerName = ref<string | null>(null);
 
 const isDealing = ref(false); 
 const isAnimating = ref(false); 
@@ -161,12 +168,12 @@ let pendingState: any = null;
 
 const pixiContainer = ref<HTMLElement | null>(null);
 
-const avatarImages: Record<string, string> = import.meta.glob('../../../assets/imagens/avatars/**/*.webp', { eager: true, import: 'default' });
+const avatarImages: Record<string, string> = import.meta.glob('../../assets/imagens/avatars/**/*.webp', { eager: true, import: 'default' });
 
 const getAvatarUrl = (filename: string | undefined) => {
   const safeFilename = filename || 'default.webp';
-  const path = `../../../assets/imagens/avatars/${safeFilename}`;
-  return avatarImages[path] || avatarImages['../../../assets/imagens/avatars/default.webp'];
+  const path = `../../assets/imagens/avatars/${safeFilename}`;
+  return avatarImages[path] || avatarImages['../../assets/imagens/avatars/default.webp'];
 };
 
 interface Player {
@@ -179,7 +186,7 @@ interface Player {
   totalCashOut: number; 
   lastChips: number; 
   isHero: boolean; 
-  status: 'waiting' | 'playing' | 'out' | 'done';
+  status: 'waiting' | 'playing' | 'out' | 'done' | 'ready';
   isSeated: boolean; 
   hasDrawnThisTurn: boolean; 
   avatar?: string; 
@@ -231,8 +238,22 @@ const modalMaxBalance = computed(() => {
 
 const myLogicalSeatOffset = ref(0);
 
+// 👇 IDENTIFICA O VENCEDOR VISUALMENTE PELA FASE RESOLVING 👇
 watch(() => gameState.phase, (newPhase, oldPhase) => {
+    if (newPhase === 'resolving') {
+        const possibleWinner = gameState.players.find(p => p.isSeated && p.status === 'playing' && p.serverCards && p.serverCards.length >= 9);
+        if (possibleWinner) {
+            winnerName.value = possibleWinner.name;
+            setTimeout(() => { winnerName.value = null; }, 6000);
+        }
+    }
+    if (newPhase === 'dealing') {
+        winnerName.value = null;
+        engine.resetBoardColors();
+    }
     if (newPhase === 'waiting' && oldPhase !== 'waiting') {
+        engine.resetBoardColors();
+        winnerName.value = null;
         if (isWaitingToLeave.value) {
             invokeStandUp();
             isWaitingToLeave.value = false;
@@ -261,10 +282,8 @@ function flushPendingState() {
 
 async function fetchUserBalance() {
   if (!currentUserId) return;
-  
   try {
       const IDENTITY_API_URL = import.meta.env.VITE_IDENTITY_API_URL || 'http://localhost:5001';
-      
       const response = await fetch(`${IDENTITY_API_URL}/api/wallet/${currentUserId}/balance`);
       if (response.ok) {
           const data = await response.json();
@@ -281,6 +300,11 @@ const cachetaHub = useCachetaHub(tableId, currentUserId, currentUserName, curren
         userTotalBalance.value = newBalance;
     }
 });
+
+function handleRebuyCancel() {
+    showRebuyModal.value = false;
+    invokeStandUp(); 
+}
 
 const engine = new CachetaPixiEngine(gameState, {
     setDealing: (v) => isDealing.value = v,
@@ -477,6 +501,7 @@ function applyState(serverState: any) {
   gameState.tableName = String(serverState.name || serverState.Name || 'MESA DE CACHETA');
   gameState.expiresAt = String(serverState.expiresAt || serverState.ExpiresAt || '');
 
+  // 👇 MOSTRA O REBUY MODAL QUANDO TERMINA A RODADA SE ELE ESTIVER SEM FICHAS 👇
   if (heroPlayer && heroPlayer.isSeated && heroPlayer.chips <= 0 && heroPlayer.status !== 'playing') {
       fetchUserBalance().then(() => showRebuyModal.value = true);
   } else {
@@ -489,7 +514,7 @@ function applyState(serverState: any) {
   }
 
   const needsDealing = gameState.players.some(p => 
-      p.isSeated && p.status === 'playing' && p.serverCards && p.serverCards.length > 0 && (!p.uiCards || p.uiCards.length === 0)
+      p.isHero && p.isSeated && p.status === 'playing' && p.serverCards && p.serverCards.length > 0 && (!p.uiCards || p.uiCards.length === 0)
   );
 
   if (needsDealing) {
@@ -507,7 +532,7 @@ function applyState(serverState: any) {
   if (gameState.phase === 'betting' && newVisualTurn !== -1) {
       if (newVisualTurn !== gameState.currentTurn || oldPhase !== 'betting') {
           gameState.currentTurn = newVisualTurn;
-          const timeToStart = normState.turnTimeLeft > 0 ? normState.turnTimeLeft : 20;
+          const timeToStart = normState.turnTimeLeft > 0 ? normState.turnTimeLeft : 60;
           engine.startTimer(newVisualTurn, timeToStart);
       }
   } else if (gameState.phase !== 'betting') {
@@ -584,7 +609,7 @@ function cancelLeaveNextHand() {
 
 function handleLobby() {
     showMenuModal.value = false;
-    router.push('/lobby');
+    router.push('/lobby-cacheta');
 }
 function handleMenuRules() { showMenuModal.value = false; }
 function handleMenuSettings() { showMenuModal.value = false; }
@@ -680,5 +705,39 @@ onUnmounted(() => {
 @keyframes slideDownFade {
   0% { transform: translate(-50%, -20px); opacity: 0; }
   100% { transform: translate(-50%, 0); opacity: 1; }
+}
+
+.winner-banner {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(10, 15, 25, 0.95);
+  border: 2px solid #00f3ff;
+  border-radius: 16px;
+  padding: 20px 40px;
+  text-align: center;
+  z-index: 1000;
+  box-shadow: 0 0 30px rgba(0, 243, 255, 0.5), inset 0 0 20px rgba(0, 243, 255, 0.3);
+  animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.winner-banner h2 {
+  color: #ffaa00;
+  margin: 0 0 10px 0;
+  font-size: 26px;
+  font-weight: 900;
+  text-shadow: 0 0 15px rgba(255, 170, 0, 0.8);
+}
+
+.winner-banner p {
+  color: white;
+  font-size: 15px;
+  margin: 0;
+}
+
+@keyframes popIn {
+  0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
 }
 </style>

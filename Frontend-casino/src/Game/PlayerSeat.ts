@@ -11,18 +11,20 @@ export class PlayerSeat {
     private nameText: PIXI.Text;
     private balanceText: PIXI.Text;
 
-    // Propriedade da classe para controle do Avatar
     private avatarSprite: PIXI.Sprite;
 
-    // Elementos visuais do assento vazio
     private sentarText: PIXI.Text;
     private plusText: PIXI.Text; 
     private seatBase3D: PIXI.Graphics;
     private outerGlow: PIXI.Graphics;
     private isStaticEmpty: boolean = false;
 
-    // Referência para animação local do portal vazio
     private idleAnim: (() => void) | null = null;
+    
+    // 🔥 VARIÁVEIS PARA OS EFEITOS MÁGICOS 🔥
+    private effectLayer: PIXI.Graphics;
+    private sitAnimTick: ((ticker: PIXI.Ticker) => void) | null = null;
+    private standAnimTick: ((ticker: PIXI.Ticker) => void) | null = null;
     
     constructor(
         x: number, 
@@ -45,44 +47,28 @@ export class PlayerSeat {
         this.emptySeatContainer.cursor = 'pointer';   
         
         if (typeof onSitDown === 'function') {
-            this.emptySeatContainer.on('pointerdown', onSitDown); 
             this.emptySeatContainer.on('pointertap', onSitDown);
-        } else {
-            console.warn("Aviso: Função onSitDown não foi passada corretamente para o assento.");
         }
 
-        // 1. Efeito de Brilho Externo (Glow Neon Azul)
         this.outerGlow = new PIXI.Graphics();
         this.outerGlow.circle(0, 0, 36);
         this.outerGlow.fill({ color: 0x00f3ff, alpha: 0.15 }); 
         this.outerGlow.blendMode = 'add';
         this.emptySeatContainer.addChild(this.outerGlow);
 
-        // 2. Base do Assento
         this.seatBase3D = new PIXI.Graphics();
         this.drawActiveSeatBase(); 
         this.emptySeatContainer.addChild(this.seatBase3D);
 
         const plusStyle = { 
-            fontFamily: 'Arial', 
-            fontSize: 24, 
-            fill: 0xffffff, 
-            fontWeight: '900', 
-            dropShadow: false, 
-            align: 'center'
+            fontFamily: 'Arial', fontSize: 24, fill: 0xffffff, fontWeight: '900', 
+            dropShadow: false, align: 'center'
         };
 
         const textStyle = { 
-            fontFamily: 'Arial', 
-            fontSize: 8.5, 
-            fill: 0xffffff, 
-            fontWeight: '900', 
-            letterSpacing: 1.5, 
-            dropShadow: true, 
-            dropShadowColor: '#00f3ff', 
-            dropShadowDistance: 0,
-            dropShadowBlur: 8,
-            align: 'center'
+            fontFamily: 'Arial', fontSize: 8.5, fill: 0xffffff, fontWeight: '900', 
+            letterSpacing: 1.5, dropShadow: true, dropShadowColor: '#00f3ff', 
+            dropShadowDistance: 0, dropShadowBlur: 8, align: 'center'
         };
 
         // @ts-ignore
@@ -114,7 +100,6 @@ export class PlayerSeat {
         // ==============================================================
         this.seatedContainer = new PIXI.Container();
 
-        // 👇 CORREÇÃO: Fundo preto sólido para avatares transparentes
         const bgCircle = new PIXI.Graphics();
         bgCircle.circle(0, 0, 30);
         bgCircle.fill({ color: 0x000000, alpha: 1 });
@@ -161,11 +146,14 @@ export class PlayerSeat {
         this.balanceText.y = 60; 
         this.seatedContainer.addChild(this.balanceText);
 
-        this.emptySeatContainer.visible = !isSeated;
-        this.seatedContainer.visible = isSeated;
+        // Camada de efeitos (Por cima de tudo para não ser cortada)
+        this.effectLayer = new PIXI.Graphics();
+        this.effectLayer.blendMode = 'add';
+        this.effectLayer.zIndex = 10; 
 
         this.container.addChild(this.emptySeatContainer);
         this.container.addChild(this.seatedContainer);
+        this.container.addChild(this.effectLayer); 
 
         // ==============================================================
         // ELEMENTOS COMUNS E TIMER 
@@ -194,13 +182,11 @@ export class PlayerSeat {
         });
         this.timerText.anchor.set(0.5); 
         this.timerLabelContainer.addChild(this.timerText);
-        
         this.container.addChild(this.timerLabelContainer);
 
         this.setSeated(isSeated);
     }
 
-    // 👇 CORREÇÃO: Força a escala 60x60 ao trocar a textura para não ficar transparente/bugado
     public setAvatarTexture(newTexture: PIXI.Texture) {
         if (this.avatarSprite && !this.avatarSprite.destroyed) {
             this.avatarSprite.texture = newTexture;
@@ -241,11 +227,233 @@ export class PlayerSeat {
     public setSeated(isSeated: boolean) {
         this.emptySeatContainer.visible = !isSeated;
         this.seatedContainer.visible = isSeated;
+        
+        // Garante que o avatar fique com escala total se a animação não estiver rodando
+        if (!this.sitAnimTick && !this.standAnimTick) {
+            this.seatedContainer.scale.set(1);
+            this.seatedContainer.alpha = 1;
+        }
+
         if(this.idleAnim) {
             if(!isSeated) PIXI.Ticker.shared.add(this.idleAnim);
             else PIXI.Ticker.shared.remove(this.idleAnim);
         }
     }
+
+    // ⚡ ANIMAÇÃO 1: O Raio ao Sentar ⚡
+    public playSitAnimation() {
+        if (this.sitAnimTick) PIXI.Ticker.shared.remove(this.sitAnimTick);
+        if (this.standAnimTick) PIXI.Ticker.shared.remove(this.standAnimTick);
+
+        this.setSeated(true);
+        this.seatedContainer.alpha = 0;
+        this.seatedContainer.scale.set(0);
+
+        let timeElapsed = 0;
+        const particles: any[] = [];
+        const colors = [0x00f3ff, 0xa855f7, 0xffffff]; 
+
+        for(let i=0; i<40; i++) {
+            particles.push({
+                x: 0, y: 0,
+                vx: (Math.random() - 0.5) * 16, 
+                vy: (Math.random() - 0.5) * 16,
+                life: 1,
+                size: Math.random() * 6 + 2,
+                color: colors[Math.floor(Math.random() * colors.length)]
+            });
+        }
+
+        this.sitAnimTick = (ticker: PIXI.Ticker) => {
+            timeElapsed += ticker.deltaTime;
+            this.effectLayer.clear();
+
+            if (timeElapsed < 12) {
+                const startY = -250;
+                const alpha = 1 - (timeElapsed / 12); 
+                
+                this.effectLayer.moveTo(0, startY);
+                
+                let currentY = startY;
+                let currentX = 0;
+                while (currentY < 0) {
+                    currentY += 40;
+                    currentX += (Math.random() - 0.5) * 50;
+                    if (currentY > 0) { currentY = 0; currentX = 0; } 
+                    this.effectLayer.lineTo(currentX, currentY);
+                }
+                
+                this.effectLayer.stroke({ width: 8, color: 0xa855f7, alpha: alpha * 0.5 });
+                this.effectLayer.stroke({ width: 3, color: 0x00f3ff, alpha: alpha });
+                this.effectLayer.stroke({ width: 1.5, color: 0xffffff, alpha: alpha }); 
+            }
+
+            let activeParticles = 0;
+            for(let p of particles) {
+                if (p.life > 0) {
+                    activeParticles++;
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    p.vx *= 0.88; 
+                    p.vy *= 0.88;
+                    p.life -= 0.02 * ticker.deltaTime;
+                    
+                    this.effectLayer.circle(p.x, p.y, p.size * p.life);
+                    this.effectLayer.fill({ color: p.color, alpha: p.life });
+                }
+            }
+
+            if (timeElapsed > 5) { 
+                if (this.seatedContainer.scale.x < 1) {
+                    const newScale = Math.min(1, this.seatedContainer.scale.x + 0.1 * ticker.deltaTime);
+                    this.seatedContainer.scale.set(newScale);
+                    this.seatedContainer.alpha = newScale;
+                }
+            }
+
+            if (activeParticles === 0 && this.seatedContainer.scale.x >= 1) {
+                if (this.sitAnimTick) {
+                    PIXI.Ticker.shared.remove(this.sitAnimTick);
+                    this.sitAnimTick = null;
+                }
+                this.effectLayer.clear();
+            }
+        };
+
+        PIXI.Ticker.shared.add(this.sitAnimTick);
+    }
+
+    // 💨 ANIMAÇÃO 2: A Bomba de Fumo ao Levantar 💨
+// 💨 ANIMAÇÃO 2: A Bombinha Mágica (Fogo, Raios e Fumaça Rápida) 💨
+    public playStandAnimation() {
+        if (this.standAnimTick) PIXI.Ticker.shared.remove(this.standAnimTick);
+        if (this.sitAnimTick) PIXI.Ticker.shared.remove(this.sitAnimTick);
+
+        this.setSeated(false);
+
+        let timeElapsed = 0;
+        const smokeParticles: any[] = [];
+        
+        // Cores: Mistura de fogo (laranja/amarelo) e fumaça (cinza escuro)
+        const smokeColors = [0x333333, 0x555555, 0x888888, 0xff5500, 0xffaa00]; 
+
+        // 1. Gera as partículas da explosão
+        for(let i=0; i < 25; i++) {
+            smokeParticles.push({
+                x: (Math.random() - 0.5) * 10, 
+                y: (Math.random() - 0.5) * 10,
+                vx: (Math.random() - 0.5) * 20, // Explosão inicial forte
+                vy: (Math.random() - 0.5) * 20,
+                life: 1.0, // Começa em 100%
+                size: Math.random() * 8 + 8, // Menores que a explosão nuclear
+                color: smokeColors[Math.floor(Math.random() * smokeColors.length)],
+                expansionRate: Math.random() * 2 + 1 
+            });
+        }
+
+        // 2. Gera a base dos "Raios" (faíscas elétricas)
+// 2. Gera a base dos "Raios" (faíscas elétricas)
+        const sparks: any[] = [];
+        for(let i=0; i < 10; i++) { // 🔥 Aumentei de 6 para 10 raios para mais volume!
+            sparks.push({
+                angle: Math.random() * Math.PI * 2,
+                length: Math.random() * 30 + 20,
+            });
+        }
+
+        this.standAnimTick = (ticker: PIXI.Ticker) => {
+            timeElapsed += ticker.deltaTime;
+            this.effectLayer.clear();
+
+            // ==========================================
+            // FASE 1: O clarão da bombinha (muito rápido)
+            // ==========================================
+            if (timeElapsed < 4) {
+                const flashAlpha = 1 - (timeElapsed / 4);
+                
+                // Brilho laranja externo
+                this.effectLayer.circle(0, 0, 20 + (timeElapsed * 2));
+                this.effectLayer.fill({ color: 0xffaa00, alpha: flashAlpha * 0.8 });
+                
+                // Miolo branco/quente
+                this.effectLayer.circle(0, 0, 10);
+                this.effectLayer.fill({ color: 0xffffff, alpha: flashAlpha });
+            }
+
+            // ==========================================
+            // FASE 2: Os Raios / Faíscas Mágicas (Coloridos)
+            // ==========================================
+            if (timeElapsed < 6) {
+                const sparkAlpha = 1 - (timeElapsed / 6);
+                
+                // 🔥 Paleta da Logo: Ciano, Roxo forte, Azul e um Rosa/Roxo Claro
+                const magicColors = [0x00f3ff, 0xa855f7, 0x3b82f6, 0xd946ef]; 
+
+                for (let s of sparks) {
+                    const startX = Math.cos(s.angle) * (10 + timeElapsed * 2);
+                    const startY = Math.sin(s.angle) * (10 + timeElapsed * 2);
+                    const endX = Math.cos(s.angle) * (s.length + timeElapsed * 8);
+                    const endY = Math.sin(s.angle) * (s.length + timeElapsed * 8);
+
+                    // Cria um zig-zag simples pro raio não ser uma linha reta
+                    const midX = (startX + endX) / 2 + (Math.random() - 0.5) * 10;
+                    const midY = (startY + endY) / 2 + (Math.random() - 0.5) * 10;
+
+                    this.effectLayer.moveTo(startX, startY);
+                    this.effectLayer.lineTo(midX, midY);
+                    this.effectLayer.lineTo(endX, endY);
+                    
+                    // Sorteia uma das cores mágicas
+                    const rayColor = magicColors[Math.floor(Math.random() * magicColors.length)];
+                    this.effectLayer.stroke({ width: 2, color: rayColor, alpha: sparkAlpha });
+                }
+            }
+
+            
+            // ==========================================
+            // FASE 3: Partículas esfriando (Fogo -> Fumaça)
+            // ==========================================
+            let activeParticles = 0;
+            for(let p of smokeParticles) {
+                if (p.life > 0) {
+                    activeParticles++;
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    
+                    // Freia as partículas rapidamente (atrito)
+                    p.vx *= 0.75; 
+                    p.vy *= 0.75;
+                    
+                    p.size += p.expansionRate * ticker.deltaTime; 
+                    p.life -= 0.06 * ticker.deltaTime; // Morre RÁPIDO para não ficar na tela
+                    
+                    // Efeito termodinâmico: Partículas de fogo viram cinza quando esfriam
+                    let drawColor = p.color;
+                    if ((p.color === 0xff5500 || p.color === 0xffaa00) && p.life < 0.6) {
+                        drawColor = 0x555555; // Vira fumaça cinza
+                    }
+
+                    this.effectLayer.circle(p.x, p.y, p.size);
+                    // O alpha máximo agora é 0.6 para fumaça, caindo suavemente pra 0
+                    this.effectLayer.fill({ color: drawColor, alpha: Math.max(0, p.life * 0.6) });
+                }
+            }
+
+            // ==========================================
+            // FINALIZAÇÃO
+            // ==========================================
+            if (activeParticles === 0 && timeElapsed > 6) {
+                if (this.standAnimTick) {
+                    PIXI.Ticker.shared.remove(this.standAnimTick);
+                    this.standAnimTick = null;
+                }
+                this.effectLayer.clear();
+            }
+        };
+
+        PIXI.Ticker.shared.add(this.standAnimTick);
+    }
+
 
     public updatePlayerInfo(name: string, chips: number) {
         const safeName = name || 'Livre';

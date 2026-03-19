@@ -6,40 +6,44 @@
     </div>
 
     <main class="lobby-content">
+      
       <div class="content-header">
-        <h2>Mesas de Meinho</h2>
-        <button class="btn-create" @click="irParaCriarMesa">Criar Mesa +</button>
+        <div class="header-titles-row">
+          <button class="btn-back" @click="voltar">←</button>
+          <div class="header-titles">
+            <h2>MEINHO</h2>
+            <span style="color: #94a3b8; font-size: 14px; font-weight: 500;">
+              {{ mappedMeinhoRooms.length }} mesas encontradas
+            </span>
+          </div>
+        </div>
+        <button class="btn-create meinho-btn-head" @click="irParaCriarMeinho">Criar Mesa Meinho +</button>
       </div>
 
       <div v-if="isLoading" class="loading-message">
-        Carregando mesas disponíveis...
+        Carregando salão do Meinho...
       </div>
 
-      <div v-if="errorMessage" class="error-message">
+      <div v-else-if="errorMessage" class="error-message">
         {{ errorMessage }}
       </div>
 
-      <div v-if="!isLoading && mesasDisponiveis.length === 0" class="empty-message">
-        Nenhuma mesa ativa no momento. Que tal criar uma?
-      </div>
-
-      <div class="table-list" v-if="!isLoading && mesasDisponiveis.length > 0">
-        <div class="table-card" v-for="mesa in mesasDisponiveis" :key="mesa.id">
-          <div class="table-info">
-            <h4>
-              {{ mesa.name }} 
-              <span v-if="mesa.hasPassword" class="lock-icon" title="Mesa com senha">🔒</span>
-            </h4>
-            <div class="table-stats">
-              <span>Ante: <strong class="gold">R$ {{ mesa.ante }}</strong></span>
-              <span>Cacife: <strong class="gold">R$ {{ mesa.minBuyIn }}</strong></span>
-              <span>Rake: <strong>{{ mesa.rake }}%</strong></span>
-              <span>Tempo: <strong>{{ mesa.durationHours }}h</strong></span>
-              <span>Jogadores: <strong>{{ mesa.currentPlayers }} / {{ mesa.maxPlayers }}</strong></span>
-            </div>
-          </div>
-          <button class="btn-play" @click="tentarEntrarNaMesa(mesa)">JOGAR</button>
+      <div v-else class="games-feed">
+        
+        <div v-if="mappedMeinhoRooms.length === 0" class="empty-message">
+          Nenhuma sala de Meinho ativa no momento. Que tal criar uma agora?
         </div>
+
+        <div v-else class="games-grid">
+          <LobbyCards 
+            v-for="room in mappedMeinhoRooms" 
+            :key="room.id"
+            :room="room"
+            :is-processing="processingId === room.id"
+            @enter="tentarEntrarNoMeinho"
+          />
+        </div>
+
       </div>
     </main>
 
@@ -63,7 +67,7 @@
         <div class="modal-actions">
           <button class="btn-cancel" @click="fecharModalSenha">Cancelar</button>
           <button class="btn-confirm" @click="verificarSenhaEEntrar" :disabled="isVerifying">
-            {{ isVerifying ? 'A verificar...' : 'Entrar' }}
+            {{ isVerifying ? 'Verificando...' : 'Entrar' }}
           </button>
         </div>
       </div>
@@ -73,19 +77,24 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
-import { authService } from '../../services/authService'; 
 
+import { authService } from '../../services/authService'; 
 import Header from '../../components/Header.vue'; 
 import BottomNav from '../../components/BottomNav.vue'; 
+import LobbyCards from '../../components/LobbyCards.vue'; 
 
 const router = useRouter();
 
 const isLoading = ref(true);
 const errorMessage = ref('');
-const mesasDisponiveis = ref<any[]>([]);
+const processingId = ref<number | null>(null);
+let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+const meinhoRoomsRaw = ref<any[]>([]);
+
+// Modais
 const showPasswordModal = ref(false);
 const selectedTableId = ref('');
 const tablePassword = ref('');
@@ -93,20 +102,20 @@ const passwordError = ref('');
 const isVerifying = ref(false);
 const passwordInput = ref<HTMLInputElement | null>(null);
 
-const carregarMesas = async () => {
-  isLoading.value = true;
-  errorMessage.value = '';
+const MEINHO_API_URL = import.meta.env.VITE_GAME_API_URL || 'http://localhost:5002';
 
+const fetchMeinhoGames = async () => {
   try {
     const token = localStorage.getItem('magic_token');
-
     if (!token) {
-      throw new Error('Não está autenticado.');
+      errorMessage.value = "Usuário não autenticado.";
+      isLoading.value = false;
+      return;
     }
 
-    const GAME_API_URL = import.meta.env.VITE_GAME_API_URL || 'http://localhost:5002';
+    errorMessage.value = '';
 
-    const response = await fetch(`${GAME_API_URL}/api/table`, {
+    const meinhoResponse = await fetch(`${MEINHO_API_URL}/api/table`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -114,32 +123,54 @@ const carregarMesas = async () => {
       }
     });
 
-    if (!response.ok) {
-      throw new Error('Não foi possível carregar as mesas.');
+    if (meinhoResponse.ok) {
+      meinhoRoomsRaw.value = await meinhoResponse.json();
+    } else {
+        throw new Error('Não foi possível carregar as mesas do Meinho.');
     }
 
-    const data = await response.json();
-    mesasDisponiveis.value = data;
-
   } catch (error: any) {
-    console.error(error);
     errorMessage.value = error.message;
   } finally {
     isLoading.value = false;
   }
 };
 
-onMounted(() => {
-  if (!authService.isAuthenticated()) {
-    router.push('/login');
-    return;
-  }
-  carregarMesas();
+const mappedMeinhoRooms = computed(() => {
+  return meinhoRoomsRaw.value.map(mesa => {
+    const startDate = new Date(Date.now() - 3600000).toISOString(); 
+    const endDate = new Date(Date.now() + (mesa.durationHours * 3600000)).toISOString(); 
+
+    return {
+      id: mesa.id,
+      name: mesa.hasPassword ? `🔒 ${mesa.name}` : mesa.name,
+      description: `Mesa de Meinho. Rake: ${mesa.rake}% | Tempo: ${mesa.durationHours}h`,
+      participantsCount: mesa.currentPlayers || mesa.current_players || 0,
+      maxParticipants: mesa.maxPlayers || mesa.max_players || 0,
+      
+      entryFee: mesa.ante || 0, 
+      prizePool: mesa.minBuyIn || mesa.min_buyin || 0, 
+
+      mode: 'MEINHO',
+      startDate: startDate,
+      endDate: endDate,
+      isJoined: false, 
+      isFavorite: false,
+      hasPassword: mesa.hasPassword,
+      // 🔥 REPASSANDO A IMAGEM EM .webp AQUI 🔥
+      coverImage: mesa.coverImage || mesa.CoverImage || 'casino.webp',
+      
+      // 👇 AQUI: Repassando o gameType para a cartinha
+      gameType: mesa.gameType || mesa.game_type || 'MEINHO'
+    };
+  });
 });
 
-const tentarEntrarNaMesa = (mesa: any) => {
-  if (mesa.hasPassword) {
-    selectedTableId.value = mesa.id;
+const tentarEntrarNoMeinho = (roomId: number) => {
+  const mesaOriginal = meinhoRoomsRaw.value.find(m => m.id === roomId);
+  
+  if (mesaOriginal && mesaOriginal.hasPassword) {
+    selectedTableId.value = roomId.toString();
     tablePassword.value = '';
     passwordError.value = '';
     showPasswordModal.value = true;
@@ -148,7 +179,13 @@ const tentarEntrarNaMesa = (mesa: any) => {
       if (passwordInput.value) passwordInput.value.focus();
     });
   } else {
-    router.push(`/mesa/${mesa.id}`);
+    // Entrada direta se não tiver senha
+    processingId.value = roomId;
+    // Pequeno delay fake para feedback visual
+    setTimeout(() => {
+      router.push(`/mesa/${roomId}`);
+      processingId.value = null;
+    }, 600);
   }
 };
 
@@ -169,9 +206,7 @@ const verificarSenhaEEntrar = async () => {
 
   try {
     const token = localStorage.getItem('magic_token');
-    const GAME_API_URL = import.meta.env.VITE_GAME_API_URL || 'http://localhost:5002';
-
-    const response = await fetch(`${GAME_API_URL}/api/table/${selectedTableId.value}/validate-password`, {
+    const response = await fetch(`${MEINHO_API_URL}/api/table/${selectedTableId.value}/validate-password`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -185,6 +220,7 @@ const verificarSenhaEEntrar = async () => {
       throw new Error(errorData.message || 'Senha incorreta!');
     }
 
+    // Senha correta, navega para a mesa
     showPasswordModal.value = false;
     router.push(`/mesa/${selectedTableId.value}`);
 
@@ -195,18 +231,39 @@ const verificarSenhaEEntrar = async () => {
   }
 };
 
-const irParaCriarMesa = () => {
+const voltar = () => {
+  router.push('/lobby');
+};
+
+const irParaCriarMeinho = () => {
   router.push('/criar-mesa');
 };
+
+// Ciclo de vida: Autenticação e Polling
+onMounted(() => {
+  if (!authService.isAuthenticated()) {
+    router.push('/login');
+    return;
+  }
+  
+  isLoading.value = true;
+  fetchMeinhoGames();
+  
+  pollInterval = setInterval(fetchMeinhoGames, 5000); 
+});
+
+onUnmounted(() => {
+  if (pollInterval) clearInterval(pollInterval);
+});
 </script>
 
 <style scoped>
-@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;900&display=swap');
 
 .screen-wrapper {
   width: 100vw;
-  min-height: 100vh;
-  min-height: 100dvh; 
+  height: 100vh;
+  height: 100dvh; 
   display: flex;
   flex-direction: column; 
   background-color: #000;
@@ -218,51 +275,103 @@ const irParaCriarMesa = () => {
 .header-full-width {
   width: 100%;
   flex-shrink: 0;
+  z-index: 50;
 }
 
 .lobby-content {
   flex: 1; 
   width: 100%;
-  max-width: 800px; 
+  max-width: 1400px; 
   margin: 0 auto; 
   padding: 20px;
   overflow-y: auto; 
   box-sizing: border-box;
+  padding-bottom: 90px;
 }
 
 .lobby-content::-webkit-scrollbar { width: 6px; }
-.lobby-content::-webkit-scrollbar-thumb { background: #a855f7; border-radius: 10px; }
+.lobby-content::-webkit-scrollbar-thumb { background: #3ce48a; border-radius: 10px; } 
 .lobby-content::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.2); }
 
 .content-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 30px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  padding-bottom: 15px;
 }
+
+.header-titles-row {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+
+.btn-back {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: white;
+  font-size: 20px;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  transition: all 0.2s;
+}
+
+.btn-back:hover { background: rgba(255,255,255,0.1); }
 
 .content-header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 900;
   text-transform: uppercase;
+  color: #fff;
+  text-shadow: 0 2px 10px rgba(60, 228, 138, 0.5);
 }
 
 .btn-create {
-  background: linear-gradient(to bottom, #a855f7, #7e22ce);
-  border: 1px solid #6b21a8;
+  background: linear-gradient(to bottom, #38bdf8, #0284c7);
+  border: 1px solid #0c4a6e;
   color: white;
-  padding: 10px 15px;
+  padding: 10px 20px;
   border-radius: 8px;
   font-weight: 900;
-  font-size: 12px;
+  font-size: 13px;
   text-transform: uppercase;
   cursor: pointer;
   box-shadow: inset 0px 2px 2px rgba(255,255,255,0.25), 0px 4px 6px rgba(0,0,0,0.5);
+  transition: all 0.2s;
 }
 
-.btn-create:active {
-  transform: translateY(2px);
+.btn-create:active { transform: translateY(2px); }
+.btn-create:hover { filter: brightness(1.1); }
+
+.meinho-btn-head {
+  background: linear-gradient(to bottom, #3ce48a, #26ab65);
+  border: 1px solid #124026;
+}
+
+.games-feed {
+  display: flex;
+  flex-direction: column;
+}
+
+.games-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 15px; 
+  padding: 10px 0;
+}
+
+@media (min-width: 1100px) {
+  .games-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
 }
 
 .loading-message {
@@ -295,76 +404,6 @@ const irParaCriarMesa = () => {
   font-size: 14px;
 }
 
-.table-list {
-  display: flex;
-  flex-direction: column;
-  gap: 15px;
-  padding-bottom: 20px; 
-}
-
-.table-card {
-  background: #111;
-  border: 1px solid #333;
-  border-radius: 12px;
-  padding: 15px 20px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-  transition: border-color 0.2s;
-}
-
-.table-card:hover {
-  border-color: #a855f7;
-}
-
-.table-info h4 {
-  margin: 0 0 8px 0;
-  font-size: 16px;
-  font-weight: 900;
-  text-transform: uppercase;
-  color: #fff;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.lock-icon {
-  font-size: 14px;
-  opacity: 0.8;
-}
-
-.table-stats {
-  display: flex;
-  gap: 10px;
-  font-size: 11px;
-  font-weight: bold;
-  color: #888;
-  flex-wrap: wrap; 
-}
-
-.gold {
-  color: #f1c40f;
-}
-
-.btn-play {
-  background: linear-gradient(to bottom, #3ce48a, #26ab65);
-  border: 1px solid #124026;
-  color: white;
-  padding: 12px 20px;
-  border-radius: 8px;
-  font-family: 'Montserrat', sans-serif;
-  font-weight: 900;
-  font-size: 13px;
-  text-transform: uppercase;
-  cursor: pointer;
-  box-shadow: inset 0px 2px 2px rgba(255,255,255,0.25), 0px 4px 6px rgba(0,0,0,0.5);
-}
-
-.btn-play:active {
-  transform: translateY(3px) scale(0.95);
-}
-
 .password-modal-overlay {
   position: fixed;
   top: 0;
@@ -381,12 +420,12 @@ const irParaCriarMesa = () => {
 
 .password-modal {
   background: linear-gradient(135deg, rgba(20, 28, 45, 0.95), rgba(10, 15, 25, 0.98));
-  border: 2px solid #f1c40f;
+  border: 2px solid #2ecc71; 
   border-radius: 16px;
   padding: 25px;
   width: 90%;
   max-width: 350px;
-  box-shadow: 0 10px 40px rgba(0,0,0,0.8), inset 0 0 15px rgba(241, 196, 15, 0.2);
+  box-shadow: 0 10px 40px rgba(0,0,0,0.8), inset 0 0 15px rgba(46, 204, 113, 0.2);
   text-align: center;
   animation: slideUp 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
@@ -397,7 +436,7 @@ const irParaCriarMesa = () => {
 }
 
 .password-modal h3 {
-  color: #f1c40f;
+  color: #2ecc71; 
   margin: 0 0 10px 0;
   font-weight: 900;
   text-transform: uppercase;
@@ -425,9 +464,7 @@ const irParaCriarMesa = () => {
   transition: border-color 0.2s;
 }
 
-.password-modal input:focus {
-  border-color: #f1c40f;
-}
+.password-modal input:focus { border-color: #2ecc71; }
 
 .modal-error {
   color: #ff4757;
@@ -436,10 +473,7 @@ const irParaCriarMesa = () => {
   margin-bottom: 15px;
 }
 
-.modal-actions {
-  display: flex;
-  gap: 10px;
-}
+.modal-actions { display: flex; gap: 10px; }
 
 .btn-cancel {
   flex: 1;
@@ -454,32 +488,22 @@ const irParaCriarMesa = () => {
   transition: all 0.2s;
 }
 
-.btn-cancel:hover {
-  background: #333;
-  color: #fff;
-}
+.btn-cancel:hover { background: #333; color: #fff; }
 
 .btn-confirm {
   flex: 1;
-  background: linear-gradient(to bottom, #f1c40f, #d4ac0d);
-  border: 1px solid #b7950b;
-  color: #000;
+  background: linear-gradient(to bottom, #3ce48a, #26ab65); 
+  border: 1px solid #124026;
+  color: white;
   padding: 12px;
   border-radius: 8px;
   font-weight: 900;
   text-transform: uppercase;
   cursor: pointer;
   box-shadow: inset 0px 2px 2px rgba(255,255,255,0.4), 0px 4px 6px rgba(0,0,0,0.5);
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
 }
 
-.btn-confirm:active {
-  transform: translateY(2px);
-}
-
-.btn-confirm:disabled {
-  background: #555;
-  color: #888;
-  border-color: #444;
-  cursor: not-allowed;
-}
+.btn-confirm:active { transform: translateY(2px); }
+.btn-confirm:disabled { background: #555; color: #888; border-color: #444; cursor: not-allowed; }
 </style>

@@ -62,6 +62,18 @@
           </div>
         </div>
 
+        <div class="input-group">
+          <label>Código de Convite (Opcional)</label>
+          <input 
+            type="text" 
+            v-model="form.referralCode" 
+            @input="form.referralCode = form.referralCode.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()"
+            placeholder="Se tiver, digite aqui" 
+            :disabled="isLoading" 
+            autocomplete="off" 
+          />
+        </div>
+
         <div class="messages-area">
           <p v-if="errorMessage" class="error-msg">{{ errorMessage }}</p>
           <p v-if="successMessage" class="success-msg">{{ successMessage }}</p>
@@ -81,11 +93,12 @@
 
 <script setup lang="ts">
 import { reactive, ref, onMounted } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import { authService } from '../services/authService';
 import logoImg from '../assets/imagens/logo-casino.png';
 
 const router = useRouter();
+const route = useRoute();
 const showPassword = ref(false);
 const isLoading = ref(false);
 const errorMessage = ref('');
@@ -95,7 +108,8 @@ const form = reactive({
   username: '', 
   password: '', 
   email: '', 
-  phone: '' 
+  phone: '',
+  referralCode: '' 
 });
 
 onMounted(() => {
@@ -105,6 +119,14 @@ onMounted(() => {
   form.phone = '';
   errorMessage.value = '';
   successMessage.value = '';
+
+  const refCodeFromUrl = route.query.ref as string;
+  if (refCodeFromUrl) {
+    localStorage.setItem('magic_referral', refCodeFromUrl);
+    form.referralCode = refCodeFromUrl;
+  } else {
+    form.referralCode = localStorage.getItem('magic_referral') || '';
+  }
 });
 
 const fazerCadastro = async () => {
@@ -115,21 +137,18 @@ const fazerCadastro = async () => {
   try {
     const userFormatado = form.username.toUpperCase();
     
-    // 1. Cria a conta no banco de dados
-    await authService.register(userFormatado, form.email, form.password, form.phone);
+    await authService.register(userFormatado, form.email, form.password, form.phone, form.referralCode);
     
     successMessage.value = 'Conta criada! Entrando no lobby...';
     
-    // 👇 2. FAZ O LOGIN AUTOMÁTICO USANDO OS DADOS QUE ELE ACABOU DE DIGITAR 👇
     await authService.login(userFormatado, form.password);
     
-    // 3. Limpa os dados sensíveis da memória por segurança
     form.username = '';
     form.password = '';
     form.email = '';
     form.phone = '';
+    localStorage.removeItem('magic_referral');
 
-    // 4. Redireciona direto para o Lobby (e não mais para a tela de login)
     setTimeout(() => router.push('/lobby'), 1000);
     
   } catch (error: any) {
@@ -151,7 +170,7 @@ const irParaLogin = () => router.push('/login');
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 20px; 
+  padding: 10px; /* Reduzido de 20px */
   box-sizing: border-box;
   background-color: #000;
   background-image: radial-gradient(circle at 50% 50%, #151e32 0%, #0a0f18 100%);
@@ -161,12 +180,12 @@ const irParaLogin = () => router.push('/login');
 .auth-box {
   width: 100%;
   max-width: 380px; 
-  max-height: 90vh; 
+  max-height: 95vh; /* Aumentado um pouco o limite máximo para não cortar fácil */
   overflow-y: auto;
   background: linear-gradient(to bottom, #000000 0%, rgba(10, 15, 24, 0.9) 100%);
   border: 2px solid #a855f7;
-  border-radius: 20px;
-  padding: 25px 20px; 
+  border-radius: 16px; /* Bordas um pouco mais suaves para salvar espaço */
+  padding: 18px 20px; /* Reduzido o padding vertical de 25px para 18px */
   box-shadow: 0 10px 40px rgba(0,0,0,0.8), 0 0 25px rgba(168, 85, 247, 0.6), inset 0 0 15px rgba(168, 85, 247, 0.4);
   box-sizing: border-box;
 }
@@ -175,19 +194,19 @@ const irParaLogin = () => router.push('/login');
 .auth-box::-webkit-scrollbar { width: 5px; }
 .auth-box::-webkit-scrollbar-thumb { background: #a855f7; border-radius: 10px; }
 
-.logo-area { text-align: center; margin-bottom: 20px; } 
+.logo-area { text-align: center; margin-bottom: 12px; } /* Reduzido de 20px */
 
 .top-title {
   color: #ffffff;
-  font-size: 16px; 
+  font-size: 14px; /* Reduzido de 16px */
   font-weight: 900;
-  letter-spacing: 4px;
-  margin-bottom: 10px;
+  letter-spacing: 3px;
+  margin-bottom: 5px; /* Reduzido de 10px */
   text-transform: uppercase;
 }
 
 .app-logo {
-  max-width: 130px; 
+  max-width: 100px; /* Reduzido de 130px para salvar muita altura */
   height: auto;
   filter: drop-shadow(0px 4px 10px rgba(0,0,0,0.8));
 }
@@ -195,18 +214,18 @@ const irParaLogin = () => router.push('/login');
 .auth-form {
   display: flex;
   flex-direction: column;
-  gap: 12px; 
+  gap: 8px; /* Reduzido o espaço entre os inputs (de 12px para 8px) */
 }
 
 .input-group {
   display: flex;
   flex-direction: column;
-  gap: 5px; 
+  gap: 3px; /* Reduzido o espaço entre a label e o input (de 5px para 3px) */
 }
 
 .input-group label {
   color: #aaa;
-  font-size: 11px;
+  font-size: 10px; /* Reduzido de 11px */
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -216,9 +235,9 @@ const irParaLogin = () => router.push('/login');
   background: #111;
   border: 1px solid #444;
   color: #fff;
-  padding: 12px; 
+  padding: 10px; /* Reduzido de 12px para 10px */
   border-radius: 8px;
-  font-size: 14px; 
+  font-size: 13px; /* Reduzido de 14px */
   outline: none;
   transition: border-color 0.2s;
 }
@@ -237,28 +256,28 @@ const irParaLogin = () => router.push('/login');
   font-size: 16px;
 }
 
-.messages-area { text-align: center; min-height: 15px; margin-top: -5px; }
-.error-msg { color: #ff4757; font-size: 12px; font-weight: bold; margin: 0; }
-.success-msg { color: #3ce48a; font-size: 12px; font-weight: bold; margin: 0; }
+.messages-area { text-align: center; min-height: 12px; margin-top: 0px; } /* Diminuído */
+.error-msg { color: #ff4757; font-size: 11px; font-weight: bold; margin: 0; }
+.success-msg { color: #3ce48a; font-size: 11px; font-weight: bold; margin: 0; }
 
 .btn-primary {
   background: linear-gradient(to bottom, #a855f7, #7e22ce);
   border: 1px solid #6b21a8;
   color: white;
-  height: 48px; 
+  height: 42px; /* Reduzido de 48px para 42px */
   border-radius: 8px;
   font-family: 'Montserrat', sans-serif;
   font-weight: 900;
-  font-size: 16px; 
+  font-size: 14px; /* Reduzido de 16px */
   text-transform: uppercase;
   cursor: pointer;
   box-shadow: inset 0px 2px 2px rgba(255,255,255,0.25), 0px 4px 6px rgba(0,0,0,0.5);
   transition: all 0.1s ease;
-  margin-top: 5px;
+  margin-top: 0px; /* Tirado a margem extra do botão */
 }
 
 .btn-primary:active { transform: translateY(3px) scale(0.98); }
 
-.auth-footer { text-align: center; margin-top: 15px; color: #888; font-size: 13px; } 
+.auth-footer { text-align: center; margin-top: 10px; color: #888; font-size: 12px; } /* Reduzido de 15px para 10px e fonte para 12px */
 .auth-footer a { color: #a855f7; text-decoration: none; font-weight: 700; }
 </style>

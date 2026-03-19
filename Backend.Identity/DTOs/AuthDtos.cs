@@ -11,6 +11,9 @@ public class RegisterDto
     [Required, MinLength(6)]
     public string Password { get; set; } = string.Empty;
     public string Phone { get; set; } = string.Empty;
+
+    // 👇 NOVO: Opcional, passado na URL do link de convite
+    public string? ReferralCode { get; set; }
 }
 
 public class LoginDto

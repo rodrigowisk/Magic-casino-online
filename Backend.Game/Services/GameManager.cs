@@ -116,6 +116,7 @@ public class GameManager
                     {
                         decimal refund = p.Chips;
                         string uId = p.UserId;
+                        int oldSeat = p.Seat;
 
                         p.IsSeated = false;
                         p.Seat = -1;
@@ -124,6 +125,12 @@ public class GameManager
                         p.LastChips = p.Chips;
                         p.Chips = 0;
                         p.LastActiveAt = DateTime.UtcNow;
+
+                        if (oldSeat != -1)
+                        {
+                            _ = hubContext.Clients.Group(tableId).SendAsync("PlayerStoodUp", oldSeat);
+                        }
+
 
                         // Se o jogador tinha dinheiro, agenda a devolução na carteira e avisa o SignalR
                         if (refund > 0 && !string.IsNullOrEmpty(uId))
@@ -259,9 +266,11 @@ public class GameManager
     }
 
     // NOVIDADE: Transformado em Task<string?> para poder devolver dinheiro assíncronamente ao desconectar
-    public async Task<string?> RemovePlayerByConnectionIdAsync(string connectionId)
+    // NOVIDADE: Transformado em Task<(string?, int)> para devolver a mesa e a cadeira exata que o cara estava
+    public async Task<(string? tableId, int seat)> RemovePlayerByConnectionIdAsync(string connectionId)
     {
         string? tableId = null;
+        int logicalSeat = -1; // 👇 GUARDA A CADEIRA AQUI
         decimal chipsToReturn = 0;
         string userId = string.Empty;
 
@@ -273,6 +282,7 @@ public class GameManager
                 if (player != null)
                 {
                     tableId = table.TableId;
+                    logicalSeat = player.Seat; // 👇 CAPTURA A CADEIRA ANTES DE ZERAR!
 
                     if (player.IsSeated && player.Status == "playing" && table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
                     {
@@ -294,7 +304,7 @@ public class GameManager
                         player.LastChips = player.Chips;
                         player.Chips = 0;
                         player.IsSeated = false;
-                        player.Seat = -1;
+                        player.Seat = -1; // Aqui ele perde a cadeira no servidor
                     }
 
                     // IMPORTANTE: Remove a conexão, mas NÃO apaga o jogador da memória (para as 6 horas valerem)
@@ -316,8 +326,10 @@ public class GameManager
             }
         }
 
-        return tableId;
+        // 👇 DEVOLVE A TUPLA COM A MESA E A CADEIRA
+        return (tableId, logicalSeat);
     }
+
 
     // NOVIDADE: Transformado em async Task<bool> para debitar da carteira antes de sentar
     public async Task<bool> SitPlayer(string tableId, string connectionId, int seat, decimal buyIn)
@@ -360,7 +372,20 @@ public class GameManager
 
             player.Seat = seat;
             player.Chips = buyIn;
-            player.TotalBuyIn += buyIn;
+
+            // 👇 CORREÇÃO: Matemática de estorno de Cashout 👇
+            // Descobre quanto do Buy-in é dinheiro que ele já tinha na mesa
+            decimal returningAmount = Math.Min(buyIn, player.LastChips);
+
+            // Descobre se há dinheiro realmente NOVO (ex: ele perdeu 2k e inteirou pra voltar com 10k)
+            decimal freshMoney = buyIn - returningAmount;
+
+            // Estorna o "Cashout" falso do dinheiro que ele trouxe de volta
+            player.TotalCashOut -= returningAmount;
+
+            // Só soma no painel de ESTATÍSTICAS se ele colocou dinheiro novo do bolso
+            player.TotalBuyIn += freshMoney;
+
             player.LastChips = 0; // Zera assim que senta na mesa
             player.IsSeated = true;
             player.Status = (table.Phase == "waiting") ? "waiting" : "out";
@@ -413,6 +438,16 @@ public class GameManager
             {
                 chipsToReturn = player.Chips;
                 userId = player.UserId;
+
+                if (player.Status == "playing" && table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
+                {
+                    player.Status = "out";
+                    table.TurnEndTime = null;
+                    table.Phase = "resolving";
+                    PublishHandToRabbitMq(table, player.Seat, 0, 0, 0, false, 0);
+                    bool roundEnded = AdvanceTurn(table);
+                    _ = ProcessNextRoundLoop(table.TableId, roundEnded, 2000);
+                }
 
                 player.IsSeated = false;
                 player.Seat = -1;

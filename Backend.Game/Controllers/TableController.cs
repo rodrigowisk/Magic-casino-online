@@ -39,7 +39,8 @@ public class TableController : ControllerBase
                 MinBuyIn = t.MinBuyIn,
                 DurationHours = t.DurationHours,
                 GameType = t.GameType, // 👇 Retorna o tipo de jogo para o frontend
-                HasPassword = !string.IsNullOrEmpty(t.PasswordHash)
+                HasPassword = !string.IsNullOrEmpty(t.PasswordHash),
+                CoverImage = t.CoverImage // 👇 NOVIDADE: Retorna a imagem da capa para o frontend mostrar no Lobby
             })
             .ToListAsync();
 
@@ -66,6 +67,7 @@ public class TableController : ControllerBase
             MinBuyIn = request.MinBuyIn,
             DurationHours = request.DurationHours,
             GameType = request.GameType, // 👇 NOVIDADE: Salva o tipo do jogo no banco
+            CoverImage = request.CoverImage, // 👇 NOVIDADE: Salva a capa selecionada no banco de dados
             CurrentPlayers = 0,
             PasswordHash = passwordHash,
             CreatedAt = DateTime.UtcNow,

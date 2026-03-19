@@ -4,11 +4,18 @@ export interface GameHubCallbacks {
     onReceiveTableState: (serverState: any) => void;
     onPlayerSkipped: (logicalSeat: number) => void;
     onPlayerBetted: (logicalSeat: number, betAmount: number, isWin: boolean, potBroken: boolean, playedCards: string[], centerCardRevealed: string) => void;
-    // 👇 NOVO: Evento para receber o saldo atualizado
     onWalletBalanceUpdated?: (newBalance: number) => void; 
+    onPlayerSatDown?: (logicalSeat: number) => void; 
+    onPlayerStoodUp?: (logicalSeat: number) => void; 
 }
 
-export function useGameHub(tableId: string, currentUserId: string, currentUserName: string, currentUserAvatar: string, callbacks: GameHubCallbacks) {
+export function useGameHub(
+    tableId: string, 
+    currentUserId: string, 
+    currentUserName: string, 
+    currentUserAvatar: string, 
+    callbacks: GameHubCallbacks
+) {
     let hubConnection: signalR.HubConnection | null = null;
 
     const connect = async () => {
@@ -22,16 +29,40 @@ export function useGameHub(tableId: string, currentUserId: string, currentUserNa
                 .withAutomaticReconnect()
                 .build();
 
-            // Mapeando os eventos do servidor para as funções que o Vue nos passou
-            hubConnection.on("ReceiveTableState", callbacks.onReceiveTableState);
-            hubConnection.on("TableStateUpdated", callbacks.onReceiveTableState);
-            hubConnection.on("PlayerSkipped", callbacks.onPlayerSkipped);
-            hubConnection.on("PlayerBetted", callbacks.onPlayerBetted);
+            // Mapeando os eventos de estado do jogo
+            hubConnection.on("ReceiveTableState", (serverState: any) => {
+                callbacks.onReceiveTableState(serverState);
+            });
 
-            // 👇 NOVO: Escuta a atualização do saldo vinda do SignalR da carteira
+            hubConnection.on("TableStateUpdated", (serverState: any) => {
+                callbacks.onReceiveTableState(serverState);
+            });
+
+            hubConnection.on("PlayerSkipped", (logicalSeat: number) => {
+                callbacks.onPlayerSkipped(logicalSeat);
+            });
+
+            hubConnection.on("PlayerBetted", (logicalSeat: number, betAmount: number, isWin: boolean, potBroken: boolean, playedCards: string[], centerCardRevealed: string) => {
+                callbacks.onPlayerBetted(logicalSeat, betAmount, isWin, potBroken, playedCards, centerCardRevealed);
+            });
+
+            // Mapeando a atualização de saldo
             hubConnection.on("WalletBalanceUpdated", (newBalance: number) => {
                 if (callbacks.onWalletBalanceUpdated) {
                     callbacks.onWalletBalanceUpdated(newBalance);
+                }
+            });
+
+            // Mapeando os Gatilhos de Efeitos Visuais (Relâmpago e Bomba de Fumo)
+            hubConnection.on("PlayerSatDown", (logicalSeat: number) => {
+                if (callbacks.onPlayerSatDown) {
+                    callbacks.onPlayerSatDown(logicalSeat);
+                }
+            });
+
+            hubConnection.on("PlayerStoodUp", (logicalSeat: number) => {
+                if (callbacks.onPlayerStoodUp) {
+                    callbacks.onPlayerStoodUp(logicalSeat);
                 }
             });
 

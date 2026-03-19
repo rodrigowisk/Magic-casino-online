@@ -87,6 +87,10 @@ public class GameHub : Hub
 
         if (seated)
         {
+            // 👇 A LINHA MÁGICA ENTRA AQUI! 👇
+            // Avisa o frontend especificamente que alguém acabou de se sentar nesta posição
+            await Clients.Group(tableId).SendAsync("PlayerSatDown", seat);
+
             await Clients.Group(tableId).SendAsync("TableStateUpdated", _gameManager.GetOrCreateTable(tableId));
             await CheckAndBroadcastGameStart(tableId);
         }
@@ -95,6 +99,7 @@ public class GameHub : Hub
             await Clients.Caller.SendAsync("ReceiveError", "Falha ao sentar. Verifique o seu saldo.");
         }
     }
+
 
     public async Task Rebuy(string tableId, decimal amount)
     {
@@ -119,21 +124,11 @@ public class GameHub : Hub
         }
     }
 
-    public async Task StandUp(string tableId)
-    {
-        // AGORA É ASYNC: Aguarda o GameManager creditar as fichas na carteira real (Identity)
-        bool stoodUp = await _gameManager.StandUp(tableId, Context.ConnectionId);
 
-        if (stoodUp)
-        {
-            var tableState = _gameManager.GetOrCreateTable(tableId);
-            await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
-        }
-    }
-
-    public async Task SetLeaveNextHand(string tableId, bool willLeave)
+    public Task SetLeaveNextHand(string tableId, bool willLeave)
     {
         _gameManager.SetLeaveNextHand(tableId, Context.ConnectionId, willLeave);
+        return Task.CompletedTask;
     }
 
     public async Task SkipBet(string tableId, string localUserId)
@@ -159,19 +154,49 @@ public class GameHub : Hub
         }
     }
 
+    public async Task StandUp(string tableId)
+    {
+        // 1. Descobre a posição do jogador ANTES de ele ser levantado pelo sistema
+        var tableState = _gameManager.GetOrCreateTable(tableId);
+        var player = tableState.Players.FirstOrDefault(p => p.ConnectionId == Context.ConnectionId && p.IsSeated);
+        int logicalSeat = player?.Seat ?? -1;
+
+        // 2. Levanta e reembolsa as fichas
+        bool stoodUp = await _gameManager.StandUp(tableId, Context.ConnectionId);
+
+        if (stoodUp)
+        {
+            // 3. 💣 DISPARA A BOMBA DE FUMO NO FRONTEND! 💣
+            if (logicalSeat != -1)
+            {
+                await Clients.Group(tableId).SendAsync("PlayerStoodUp", logicalSeat);
+            }
+
+            var newState = _gameManager.GetOrCreateTable(tableId);
+            await Clients.Group(tableId).SendAsync("TableStateUpdated", newState);
+        }
+    }
+
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        // AGORA É ASYNC: Devolve as fichas para o jogador caso ele feche a aba/desconecte do nada
-        string? tableId = await _gameManager.RemovePlayerByConnectionIdAsync(Context.ConnectionId);
+        // Recebe a mesa e a cadeira exata da Tupla
+        var (tableId, logicalSeat) = await _gameManager.RemovePlayerByConnectionIdAsync(Context.ConnectionId);
 
         if (tableId != null)
         {
+            // Se ele estava sentado, solta a bomba de fumaça
+            if (logicalSeat != -1)
+            {
+                await Clients.Group(tableId).SendAsync("PlayerStoodUp", logicalSeat);
+            }
+
             var tableState = _gameManager.GetOrCreateTable(tableId);
             await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
         }
 
         await base.OnDisconnectedAsync(exception);
     }
+
 
     // MÉTODO AUXILIAR PARA EVITAR CÓDIGO REPETIDO
     private async Task CheckAndBroadcastGameStart(string tableId)

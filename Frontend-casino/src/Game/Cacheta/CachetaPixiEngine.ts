@@ -1,6 +1,6 @@
 import * as PIXI from 'pixi.js';
 import { Deck } from '../Deck';
-import { PlayerSeat } from '../PlayerSeat';
+import { PlayerSeat } from './PlayerSeat';
 import { Animator } from '../Animator';
 
 export interface CachetaEngineCallbacks {
@@ -16,20 +16,20 @@ export class CachetaPixiEngine {
     public deckInstance: Deck | null = null;
     public tableInfoTextUI: PIXI.Text | null = null;
     
-    // 👇 MANTIDO DO MEINHO: Cache robusto de texturas
     private avatarTextureCache: Map<string, PIXI.Texture> = new Map();
 
     public backgroundLayer = new PIXI.Container();
-    public particleLayer = new PIXI.Container();
     public mainLayer = new PIXI.Container();
+    public cardLayer = new PIXI.Container(); 
+    public particleLayer = new PIXI.Container();
 
-    // Coordenadas centrais exclusivas da Cacheta
-    public readonly MONTE_X = 175;
+    public readonly MONTE_X = 190;
     public readonly MONTE_Y = 420;
-    public readonly LIXO_X = 255;
+    public readonly LIXO_X = 270;
     public readonly LIXO_Y = 420;
-    public readonly VIRA_X = 215;
-    public readonly VIRA_Y = 330;
+    public readonly VIRA_X = 190 - 45; 
+    public readonly VIRA_Y = 420;
+    public readonly CENTER_CARDS_SCALE = 1.45; 
 
     public cardTargets: { x: number, y: number, seat: number }[] = [];
     public dealtCardsUI: PIXI.Container[] = [];
@@ -37,19 +37,23 @@ export class CachetaPixiEngine {
     public seatCoords: { x: number, y: number }[] = [];
     public activeFireParticles: { mesh: PIXI.Graphics; life: number; vx: number; vy: number; }[] = [];
 
-    // Controle da Mão do Jogador (Hero)
     public heroCardData: { str: string, sprite: PIXI.Container }[] = [];
     public selectedCardStr: string | null = null;
 
-    // Elementos da mesa da Cacheta
     public viraCardUI: PIXI.Container | null = null;
     public lixoCardsUI: PIXI.Container[] = [];
+    public sortBtnUI: PIXI.Container | null = null; 
+    public winnerCardsUI: PIXI.Container[] = []; 
 
     public activeTimerSeat = -1;
     public turnEndTime = 0;
-    public readonly TIMER_DURATION_SEC = 20;
+    public readonly TIMER_DURATION_SEC = 60;
 
     public readonly MAGIC_COLORS = [0x00f3ff, 0xa855f7, 0xff6bfb, 0xffffff];
+
+    private isDealingCardsAnimationRunning: boolean = false;
+    private lastPhaseTracker: string = 'waiting';
+    private sortMode: number = 0; 
 
     constructor(
         public gameState: any, 
@@ -75,8 +79,9 @@ export class CachetaPixiEngine {
         this.app.stage.hitArea = new PIXI.Rectangle(0, 0, width, height);
 
         this.app.stage.addChild(this.backgroundLayer); 
-        this.app.stage.addChild(this.particleLayer);
         this.app.stage.addChild(this.mainLayer);
+        this.app.stage.addChild(this.cardLayer); 
+        this.app.stage.addChild(this.particleLayer); 
 
         canvasContainer.appendChild(this.app.canvas);
 
@@ -88,7 +93,6 @@ export class CachetaPixiEngine {
         let tableTexture = PIXI.Texture.EMPTY;
         let deckTexture = PIXI.Texture.EMPTY;
 
-        // 👇 CORREÇÃO: Carregamento blindado igual ao Meinho, mas separado para não explodir a aura azul se uma imagem falhar
         try { if (tableImg) tableTexture = await PIXI.Assets.load(tableImg); } catch (e) { console.error("Mesa: ", e); }
         try { if (deckImg) deckTexture = await PIXI.Assets.load(deckImg); } catch (e) { console.error("Deck: ", e); }
         try { 
@@ -105,15 +109,16 @@ export class CachetaPixiEngine {
         let scale = Math.min(width / (tableTexture.width || width || 1), height / (tableTexture.height || height || 1));
         const margemFator = 1.3; 
         tableSprite.scale.set(scale * margemFator);
-        
         tableSprite.x = width / 2;
         tableSprite.y = height / 2.1;
         
         const neonGlow = new PIXI.Graphics();
         neonGlow.ellipse(0, 0, (tableSprite.width || width) * 0.48, (tableSprite.height || height) * 0.42);
         neonGlow.fill({ color: 0x00f3ff, alpha: 0.8 }); 
+        
         const blurFilter = new PIXI.BlurFilter();
-        blurFilter.blur = 60; 
+        blurFilter.strength = 60; 
+        
         neonGlow.filters = [blurFilter];
         neonGlow.x = tableSprite.x;
         neonGlow.y = tableSprite.y;
@@ -142,11 +147,9 @@ export class CachetaPixiEngine {
         this.updateAllBalances();
     }
     
-    // 👇 MANTIDO DO MEINHO: Busca a textura de forma segura
     private getAvatarTexture(url?: string): PIXI.Texture {
         if (!url) return this.avatarTextureCache.get('default') || PIXI.Texture.EMPTY;
         if (this.avatarTextureCache.has(url)) return this.avatarTextureCache.get(url)!;
-
         try {
             const texture = PIXI.Texture.from(url);
             this.avatarTextureCache.set(url, texture);
@@ -158,21 +161,23 @@ export class CachetaPixiEngine {
 
     public buildSeats(numSeats: number) {
         this.playerSeats.forEach(seat => {
-            if (seat.container.parent) seat.container.parent.removeChild(seat.container);
-            seat.container.destroy({ children: true });
+            if (typeof seat.destroy === 'function') {
+                seat.destroy();
+            } else {
+                if (seat.container.parent) seat.container.parent.removeChild(seat.container);
+                seat.container.destroy({ children: true });
+            }
         });
         
         this.playerSeats = [];
         this.cardTargets = [];
         this.seatCoords = []; 
 
-        // Garante que vai renderizar mesmo que o servidor mande um número inesperado
         const safeNumSeats = Math.max(2, Math.min(6, numSeats || 6));
 
         for (let i = 0; i < safeNumSeats; i++) {
             let avatarX = 0, avatarY = 0, cx = 0, cy = 0;
 
-            // Posições calculadas para 2 até 6 jogadores
             if (safeNumSeats === 2) {
                 if (i === 0) { avatarX = 220; avatarY = 738; cx = avatarX; cy = avatarY - 80; } 
                 else if (i === 1) { avatarX = 212; avatarY = 93; cx = avatarX; cy = avatarY + 70; }  
@@ -195,7 +200,7 @@ export class CachetaPixiEngine {
                 else if (i === 3) { avatarX = 372; avatarY = 240; cx = avatarX - 60; cy = avatarY; } 
                 else if (i === 4) { avatarX = 372; avatarY = 530; cx = avatarX - 60; cy = avatarY; }
             }
-            else { // Padrão 6 lugares
+            else { 
                 if (i === 0) { avatarX = 220; avatarY = 738; cx = avatarX; cy = avatarY - 80; } 
                 else if (i === 1) { avatarX = 45; avatarY = 530; cx = avatarX + 60; cy = avatarY; } 
                 else if (i === 2) { avatarX = 47; avatarY = 240; cx = avatarX + 60; cy = avatarY; } 
@@ -206,7 +211,6 @@ export class CachetaPixiEngine {
 
             this.seatCoords[i] = { x: avatarX, y: avatarY };
             const player = this.gameState.players[i] || { name: 'Livre', chips: 0, isSeated: false };
-            
             this.cardTargets.push({ x: cx, y: cy, seat: i });
 
             const seatUi = new PlayerSeat(
@@ -217,7 +221,6 @@ export class CachetaPixiEngine {
         }
     }
     
-
     private updateDeckVisibility() {
         if (this.deckInstance && this.gameState && this.gameState.players) {
             const seatedCount = this.gameState.players.filter((p: any) => p.isSeated).length;
@@ -225,7 +228,6 @@ export class CachetaPixiEngine {
         }
     }
 
-    // 👇 MANTIDO DO MEINHO: Função 100% igual que atualiza a cadeira sem quebrar
     public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chips: number, status: string, avatarUrl?: string) {
         const seatUi = this.playerSeats[seatIndex];
         if (seatUi) {
@@ -243,7 +245,6 @@ export class CachetaPixiEngine {
                     if (defaultTex && typeof (seatUi as any).setAvatarTexture === 'function') {
                         (seatUi as any).setAvatarTexture(defaultTex);
                     }
-
                     PIXI.Assets.load(avatarUrl).then((texture) => {
                         this.avatarTextureCache.set(avatarUrl, texture);
                         if (typeof (seatUi as any).setAvatarTexture === 'function') {
@@ -252,7 +253,6 @@ export class CachetaPixiEngine {
                     }).catch(e => console.error("Erro ao carregar avatar", e));
                 }
             }
-            
             if (isSeated && (status === 'out' || status === 'done')) {
                 seatUi.darken();
             } else {
@@ -263,14 +263,30 @@ export class CachetaPixiEngine {
     }
 
     public clearDealtCards() {
-        this.dealtCardsUI.forEach(card => this.safeDestroy(card));
-        this.dealtCardsUI.length = 0;
+        this.isDealingCardsAnimationRunning = false; 
+
+        const allCards = [...this.cardLayer.children];
+        allCards.forEach(card => {
+            this.safeDestroy(card as PIXI.Container);
+        });
+
+        if (this.viraCardUI && this.viraCardUI.parent) {
+            this.safeDestroy(this.viraCardUI);
+        }
+        
+        this.winnerCardsUI.forEach(c => this.safeDestroy(c));
+        this.winnerCardsUI = [];
+
         this.heroCardData = []; 
         this.selectedCardStr = null;
-        
-        if (this.viraCardUI) this.safeDestroy(this.viraCardUI);
-        this.lixoCardsUI.forEach(card => this.safeDestroy(card));
-        this.lixoCardsUI.length = 0;
+        this.viraCardUI = null;
+        this.sortBtnUI = null;
+
+        if (this.gameState && this.gameState.players) {
+            this.gameState.players.forEach((p: any) => {
+                if (p) p.uiCards = []; 
+            });
+        }
     }
 
     public startTimer(seatIndex: number, timeLeftSeconds: number) {
@@ -286,72 +302,264 @@ export class CachetaPixiEngine {
         this.playerSeats.forEach(seat => seat.stopTimer());
     }
 
+    private drawSortButton(x: number, y: number) {
+        if (this.sortBtnUI) {
+            this.sortBtnUI.x = x;
+            this.sortBtnUI.y = y;
+            return;
+        }
+        
+        this.sortBtnUI = new PIXI.Container();
+        const bg = new PIXI.Graphics();
+        bg.circle(0, 0, 18);
+        bg.fill({ color: 0x1a2639, alpha: 0.95 });
+        bg.stroke({ width: 2, color: 0x00f3ff, alpha: 0.8 });
+        
+        const icon = new PIXI.Text({
+            text: '⚡', 
+            style: { fontSize: 16, fill: 0xffffff, align: 'center' }
+        } as any);
+        icon.anchor.set(0.5);
+        
+        this.sortBtnUI.addChild(bg);
+        this.sortBtnUI.addChild(icon);
+        this.sortBtnUI.x = x;
+        this.sortBtnUI.y = y;
+        this.sortBtnUI.eventMode = 'static';
+        this.sortBtnUI.cursor = 'pointer';
+        
+        this.sortBtnUI.on('pointerdown', () => {
+            this.sortBtnUI!.scale.set(0.85);
+            setTimeout(() => { if(this.sortBtnUI) this.sortBtnUI.scale.set(1.0); }, 100);
+            this.sortMode = (this.sortMode + 1) % 2; 
+            this.sortHeroHand();
+        });
+        
+        this.cardLayer.addChild(this.sortBtnUI);
+    }
+
+    private getHeroLayout(totalCards: number) {
+        const screenWidth = this.app ? this.app.screen.width : window.innerWidth;
+        const availableWidth = screenWidth * 0.90; 
+        const scale = screenWidth < 600 ? 1.6 : 1.9; 
+        const maxSpread = screenWidth < 600 ? 40 : 50; 
+        const spreadFactor = Math.min(availableWidth / Math.max(1, totalCards), maxSpread);
+        return { spreadFactor, scale };
+    }
+
+    public sortHeroHand() {
+        const hero = this.gameState.players.find((p: any) => p.isHero);
+        if (!hero || !hero.serverCards || hero.serverCards.length === 0) return;
+
+        const suitOrder: Record<string, number> = { '♥': 1, '♠': 2, '♦': 3, '♣': 4 };
+        const rankOrder: Record<string, number> = { 'A': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 11, 'Q': 12, 'K': 13 };
+
+        let wildcardRank = -1;
+        let wildcardSuit = '';
+        if (this.gameState.viraCard) {
+            const vRank = this.gameState.viraCard.slice(0, -1);
+            wildcardSuit = this.gameState.viraCard.slice(-1);
+            const vVal = rankOrder[vRank];
+            wildcardRank = vVal === 13 ? 1 : vVal + 1; 
+        }
+
+        const wildcards: string[] = [];
+        const regularCards: string[] = [];
+
+        hero.serverCards.forEach((c: string) => {
+            const rank = c.slice(0, -1);
+            const suit = c.slice(-1);
+            if (rankOrder[rank] === wildcardRank && suit === wildcardSuit) {
+                wildcards.push(c);
+            } else {
+                regularCards.push(c);
+            }
+        });
+
+        const rankGroups: Record<string, string[]> = {};
+        regularCards.forEach(c => {
+            const rank = c.slice(0, -1);
+            if (!rankGroups[rank]) rankGroups[rank] = [];
+            rankGroups[rank].push(c);
+        });
+
+        const trincas: string[] = [];
+        const pares: string[] = [];
+        const leftovers: string[] = [];
+
+        Object.keys(rankGroups).forEach(rank => {
+            const cards = rankGroups[rank];
+            if (cards.length >= 3) {
+                cards.sort((a, b) => suitOrder[a.slice(-1)] - suitOrder[b.slice(-1)]);
+                trincas.push(...cards);
+            } else if (cards.length === 2) {
+                cards.sort((a, b) => suitOrder[a.slice(-1)] - suitOrder[b.slice(-1)]);
+                pares.push(...cards);
+            } else {
+                leftovers.push(...cards);
+            }
+        });
+
+        leftovers.sort((a, b) => {
+            const rA = a.slice(0, -1);
+            const sA = a.slice(-1);
+            const rB = b.slice(0, -1);
+            const sB = b.slice(-1);
+
+            if (suitOrder[sA] !== suitOrder[sB]) {
+                return suitOrder[sA] - suitOrder[sB];
+            }
+            return rankOrder[rA] - rankOrder[rB];
+        });
+
+        const sortedCards = [...wildcards, ...trincas, ...pares, ...leftovers];
+        hero.serverCards = sortedCards;
+
+        const spreadFactor = 32; 
+        const totalCards = hero.serverCards.length;
+        const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
+        const target = this.cardTargets.find(c => c.seat === hero.seat);
+        if (!target) return;
+
+        const newHeroCardData: any[] = [];
+        const availableSprites = [...this.heroCardData]; 
+        
+        hero.serverCards.forEach((cardStr: string, index: number) => {
+            const spriteIndex = availableSprites.findIndex(c => c.str === cardStr);
+            if (spriteIndex !== -1) {
+                const cardData = availableSprites[spriteIndex];
+                availableSprites.splice(spriteIndex, 1); 
+
+                newHeroCardData.push(cardData);
+                const finalX = target.x + startOffset + (index * spreadFactor);
+                this.performAnimation(cardData.sprite, finalX, cardData.sprite.y, 15);
+            }
+        });
+        
+        this.heroCardData = newHeroCardData;
+        
+        this.heroCardData.forEach(c => {
+            this.cardLayer.setChildIndex(c.sprite, this.cardLayer.children.length - 1);
+        });
+    }
+
     public syncBoard() {
         if (!this.deckInstance || !this.app) return;
 
+        const activePlayersCount = this.gameState.players.filter((p: any) => p.isSeated && p.status === 'playing').length;
+        if (activePlayersCount === 0) {
+            this.clearDealtCards();
+            return;
+        }
+
+        if (this.gameState.phase === 'dealing' && this.lastPhaseTracker !== 'dealing') {
+            this.lastPhaseTracker = 'dealing';
+            this.startGameAutomatically();
+            return;
+        }
+        
+        if (this.gameState.phase === 'resolving') {
+            this.clearDealtCards();
+            const possibleWinner = this.gameState.players.find((p:any) => p.isSeated && p.status === 'playing' && p.serverCards && p.serverCards.length >= 9);
+            if (possibleWinner) {
+                const visualSeat = this.cardTargets.find(c => c.seat === possibleWinner.seat)?.seat;
+                if (visualSeat !== undefined) {
+                    this.darkenBoardForWinner(visualSeat);
+                    this.showWinnerCards(visualSeat, possibleWinner.serverCards);
+                }
+            }
+            return; 
+        }
+
+        this.lastPhaseTracker = this.gameState.phase;
+
+        if (this.isDealingCardsAnimationRunning) return;
+
+        this.clearDealtCards();
+
         if (this.gameState.viraCard) {
-            if (!this.viraCardUI) {
-                const rank = this.gameState.viraCard.slice(0, -1) || "A";
-                const suit = this.gameState.viraCard.slice(-1) || "♠";
-                this.viraCardUI = this.deckInstance.createCardToDeal(true, rank, suit);
-                this.viraCardUI.scale.set(0.65);
-                this.viraCardUI.x = this.VIRA_X;
-                this.viraCardUI.y = this.VIRA_Y;
-                this.mainLayer.addChild(this.viraCardUI);
+            const rank = this.gameState.viraCard.slice(0, -1) || "A";
+            const suit = this.gameState.viraCard.slice(-1) || "♠";
+            this.viraCardUI = this.deckInstance.createCardToDeal(true, rank, suit);
+            this.viraCardUI.scale.set(this.CENTER_CARDS_SCALE); 
+            this.viraCardUI.x = this.VIRA_X;
+            this.viraCardUI.y = this.VIRA_Y;
+            this.viraCardUI.rotation = Math.PI / -2; 
+
+            const deckIndex = this.mainLayer.getChildIndex(this.deckInstance.view);
+            this.mainLayer.addChildAt(this.viraCardUI, Math.max(0, deckIndex));
+        }
+
+        if (this.gameState.discardPile && this.gameState.discardPile.length > 0) {
+            const pile = this.gameState.discardPile;
+            const maxShow = Math.min(3, pile.length);
+            
+            for (let i = maxShow - 1; i >= 0; i--) {
+                const cardStr = pile[pile.length - 1 - i];
+                const rank = cardStr.slice(0, -1) || "A";
+                const suit = cardStr.slice(-1) || "♠";
+                const lixoCard = this.deckInstance.createCardToDeal(true, rank, suit);
+                
+                lixoCard.scale.set(this.CENTER_CARDS_SCALE); 
+                lixoCard.x = this.LIXO_X; 
+                lixoCard.y = this.LIXO_Y; 
+                
+                this.cardLayer.addChild(lixoCard);
+                this.lixoCardsUI.push(lixoCard);
             }
         }
 
-        this.lixoCardsUI.forEach(c => this.safeDestroy(c));
-        this.lixoCardsUI = [];
-        if (this.gameState.discardPile && this.gameState.discardPile.length > 0) {
-            const topCardStr = this.gameState.discardPile[this.gameState.discardPile.length - 1];
-            const rank = topCardStr.slice(0, -1) || "A";
-            const suit = topCardStr.slice(-1) || "♠";
-            const lixoCard = this.deckInstance.createCardToDeal(true, rank, suit);
-            lixoCard.scale.set(0.65);
-            lixoCard.x = this.LIXO_X;
-            lixoCard.y = this.LIXO_Y;
-            this.mainLayer.addChild(lixoCard);
-            this.lixoCardsUI.push(lixoCard);
-        }
+        for (let i = 0; i < this.gameState.maxPlayers; i++) {
+            const player = this.gameState.players[i];
+            if (player && player.isSeated && player.status === 'playing') {
+                const target = this.cardTargets.find(c => c.seat === i);
+                if (!target) continue;
 
-        const hero = this.gameState.players.find((p: any) => p.isHero);
-        if (hero && hero.serverCards) {
-            const currentServerCards = [...hero.serverCards];
-            
-            this.heroCardData.forEach(c => this.safeDestroy(c.sprite));
-            this.heroCardData = [];
-            
-            const totalCards = currentServerCards.length;
-            const spreadFactor = 30; 
-            const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
-            const targetY = this.seatCoords[0].y - 95;
-
-            currentServerCards.forEach((cardStr, index) => {
-                const rank = cardStr.slice(0, -1) || "A";
-                const suit = cardStr.slice(-1) || "♠";
-                const cardSprite = this.deckInstance!.createCardToDeal(true, rank, suit);
+                const isTargetHero = player.isHero;
                 
-                cardSprite.scale.set(0.9);
-                cardSprite.x = this.seatCoords[0].x + startOffset + (index * spreadFactor);
-                cardSprite.y = targetY;
-                
-                cardSprite.eventMode = 'static';
-                cardSprite.cursor = 'pointer';
-                cardSprite.on('pointerdown', () => this.onHeroCardClicked(cardStr, cardSprite));
-
-                if (this.selectedCardStr === cardStr) {
-                    cardSprite.y -= 15;
+                if (!isTargetHero) {
+                    if (!player.uiCards) player.uiCards = []; 
+                    continue; 
                 }
 
-                this.mainLayer.addChild(cardSprite);
-                this.heroCardData.push({ str: cardStr, sprite: cardSprite });
-            });
+                const totalCards = player.serverCards ? player.serverCards.length : 9;
+                
+                const layout = this.getHeroLayout(totalCards);
+                const finalScale = layout.scale;
+                const spreadFactor = layout.spreadFactor; 
+                const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
+                
+                const targetY = this.seatCoords[0].y - 112;
+
+                for (let c = 0; c < totalCards; c++) {
+                    const cardStr = player.serverCards ? player.serverCards[c] : "A♠";
+                    const rank = cardStr ? (cardStr.slice(0, -1) || "A") : "A";
+                    const suit = cardStr ? (cardStr.slice(-1) || "♠") : "♠";
+
+                    const cardSprite = this.deckInstance.createCardToDeal(true, rank, suit);
+                    cardSprite.scale.set(finalScale);
+
+                    cardSprite.x = target.x + startOffset + (c * spreadFactor);
+                    cardSprite.y = targetY;
+
+                    cardSprite.eventMode = 'static';
+                    cardSprite.cursor = 'pointer';
+                    cardSprite.on('pointerdown', () => this.onHeroCardClicked(cardStr, cardSprite));
+                    if (this.selectedCardStr === cardStr) cardSprite.y -= 25;
+                    this.heroCardData.push({ str: cardStr, sprite: cardSprite });
+
+                    this.cardLayer.addChild(cardSprite);
+                    if (!player.uiCards) player.uiCards = [];
+                    player.uiCards.push(cardSprite);
+                }
+
+                this.drawSortButton(target.x + startOffset - 10, targetY + 80);
+            }
         }
     }
 
     private onHeroCardClicked(cardStr: string, clickedSprite: PIXI.Container) {
-        const baseTargetY = this.seatCoords[0].y - 95;
+        const baseTargetY = this.seatCoords[0].y - 112;
 
         this.heroCardData.forEach(c => {
             c.sprite.y = baseTargetY;
@@ -362,39 +570,143 @@ export class CachetaPixiEngine {
             this.callbacks.onCardSelected(null);
         } else {
             this.selectedCardStr = cardStr;
-            clickedSprite.y = baseTargetY - 15;
+            clickedSprite.y = baseTargetY - 25;
             this.callbacks.onCardSelected(cardStr);
         }
     }
 
+    private launchCardAnimation(card: PIXI.Container, targetX: number, targetY: number, trailColor: number) {
+        const trailAnim = () => {
+            if (!this.app || card.destroyed) return;
+            const p = new PIXI.Graphics();
+            p.circle(0, 0, 3);
+            p.fill({ color: trailColor, alpha: 0.6 });
+            p.x = card.x;
+            p.y = card.y;
+            this.particleLayer.addChild(p);
+            this.activeFireParticles.push({
+                mesh: p, life: 0.6, vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5
+            });
+        };
+        if (this.app) this.app.ticker.add(trailAnim);
+
+        this.performAnimation(card, targetX, targetY, 25).then(() => {
+            if (this.app) this.app.ticker.remove(trailAnim);
+        }).catch(() => {
+            if (this.app) this.app.ticker.remove(trailAnim);
+        });
+    }
+
     public async startGameAutomatically() {
+        if (this.isDealingCardsAnimationRunning) return;
         this.callbacks.setDealing(true);
         this.callbacks.setAnimating(true); 
         
         try {
             this.resetAvatars();
             this.clearDealtCards();
+
+            this.isDealingCardsAnimationRunning = true; 
             
+            const dealOrder: number[] = [];
             for (let i = 0; i < this.gameState.maxPlayers; i++) {
-                const player = this.gameState.players[i];
-                if (player && player.isSeated && player.status === 'playing' && !player.isHero) {
-                    const target = this.cardTargets.find(c => c.seat === i);
-                    if (target) {
-                        const backCard = this.deckInstance!.createCardToDeal(false, "A", "♠");
-                        backCard.scale.set(0.5);
-                        this.mainLayer.addChild(backCard);
-                        this.dealtCardsUI.push(backCard);
-                        await this.performAnimation(backCard, target.x, target.y, 25);
-                    }
+                if (this.gameState.players[i] && this.gameState.players[i].isSeated && this.gameState.players[i].status === 'playing') {
+                    dealOrder.push(i);
                 }
             }
 
-            this.syncBoard();
+            for (let round = 0; round < 3; round++) {
+                if (!this.isDealingCardsAnimationRunning) break; 
 
+                for (const seatIndex of dealOrder) {
+                    if (!this.isDealingCardsAnimationRunning) break; 
+
+                    const player = this.gameState.players[seatIndex];
+                    const isTargetHero = player.isHero;
+                    
+                    if (!isTargetHero) continue;
+
+                    const target = this.cardTargets.find(c => c.seat === seatIndex);
+                    if (!target || !this.app || !this.deckInstance) continue;
+
+                    const totalCards = 9;
+                    const layout = this.getHeroLayout(totalCards);
+                    const finalScale = layout.scale;
+                    const spreadFactor = layout.spreadFactor;
+                    
+                    const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
+                    const targetY = this.seatCoords[0].y - 112;
+
+                    for (let c = 0; c < 3; c++) {
+                        if (!this.isDealingCardsAnimationRunning) break; 
+
+                        const cardIndex = (round * 3) + c;
+                        const finalX = target.x + startOffset + (cardIndex * spreadFactor);
+
+                        const cardStr = player.serverCards ? player.serverCards[cardIndex] : "A♠";
+                        const rank = cardStr ? (cardStr.slice(0, -1) || "A") : "A";
+                        const suit = cardStr ? (cardStr.slice(-1) || "♠") : "♠";
+
+                        const card = this.deckInstance.createCardToDeal(true, rank, suit);
+                        card.scale.set(finalScale);
+
+                        card.x = this.MONTE_X;
+                        card.y = this.MONTE_Y;
+
+                        this.cardLayer.addChild(card);
+
+                        card.eventMode = 'static';
+                        card.cursor = 'pointer';
+                        card.on('pointerdown', () => this.onHeroCardClicked(cardStr, card));
+                        this.heroCardData.push({ str: cardStr, sprite: card });
+
+                        if (!player.uiCards) player.uiCards = [];
+                        player.uiCards.push(card);
+
+                        this.launchCardAnimation(card, finalX, targetY, 0x00f3ff);
+                        await this.pixiDelay(50);
+                    }
+                    
+                    if (round === 2) {
+                        this.drawSortButton(target.x + startOffset - 10, targetY + 80);
+                    }
+
+                    await this.pixiDelay(150); 
+                }
+            }
+
+            if (this.isDealingCardsAnimationRunning && this.gameState.viraCard) {
+                const vRank = this.gameState.viraCard.slice(0, -1) || "A";
+                const vSuit = this.gameState.viraCard.slice(-1) || "♠";
+                const viraCard = this.deckInstance!.createCardToDeal(true, vRank, vSuit);
+                
+                viraCard.scale.set(this.CENTER_CARDS_SCALE);
+                viraCard.x = this.MONTE_X;
+                viraCard.y = this.MONTE_Y;
+                viraCard.rotation = Math.PI / -2; 
+
+                const deckIndex = this.mainLayer.getChildIndex(this.deckInstance!.view);
+                this.mainLayer.addChildAt(viraCard, Math.max(0, deckIndex));
+
+                this.cardLayer.addChild(viraCard);
+                this.launchCardAnimation(viraCard, this.VIRA_X, this.VIRA_Y, 0xff6bfb);
+
+                await this.pixiDelay(200);
+                this.viraCardUI = viraCard;
+            }
+
+        } catch (err) {
+            console.error("Erro seguro ignorado na animação: ", err);
         } finally {
+            const wasAborted = !this.isDealingCardsAnimationRunning;
+            this.isDealingCardsAnimationRunning = false;
             this.callbacks.setDealing(false);
             this.callbacks.setAnimating(false);
             this.callbacks.flushPendingState();
+
+            if (!wasAborted) {
+                this.syncBoard(); 
+            }
         }
     }
 
@@ -415,19 +727,11 @@ export class CachetaPixiEngine {
         if (obj && !obj.destroyed) {
             obj.visible = false; 
             if (this.app && obj.parent) obj.parent.removeChild(obj);
-            if (this.app) {
-                this.pixiDelay(2000).then(() => {
-                    if (obj && !obj.destroyed) {
-                        try { obj.destroy({ children: true }); } catch (e) {}
-                    }
-                });
-            } else {
-                setTimeout(() => {
-                    if (obj && !obj.destroyed) {
-                        try { obj.destroy({ children: true }); } catch (e) {}
-                    }
-                }, 2000);
-            }
+            setTimeout(() => {
+                if (obj && !obj.destroyed) {
+                    try { obj.destroy({ children: true }); } catch (e) {}
+                }
+            }, 1000);
         }
     }
 
@@ -535,6 +839,163 @@ export class CachetaPixiEngine {
     public updateHeroSeatStatus(isHeroSeated: boolean) {
         this.playerSeats.forEach(seat => {
             if (seat) seat.setEmptyState(isHeroSeated);
+        });
+    }
+
+    public darkenBoardForWinner(winnerSeat: number) {
+        const darkAlpha = 0.35; 
+        this.playerSeats.forEach((seat, index) => {
+            if (index !== winnerSeat) seat.container.alpha = darkAlpha;
+            else seat.container.scale.set(1.1);
+        });
+
+        if (this.deckInstance) this.deckInstance.view.alpha = darkAlpha;
+        if (this.viraCardUI) this.viraCardUI.alpha = darkAlpha;
+        this.lixoCardsUI.forEach(c => c.alpha = darkAlpha);
+
+        this.gameState.players.forEach((p: any, index: number) => {
+            if (index !== winnerSeat && p.uiCards) {
+                p.uiCards.forEach((c: any) => c.alpha = darkAlpha);
+            }
+        });
+    }
+
+    public resetBoardColors() {
+        this.playerSeats.forEach(seat => {
+            seat.container.alpha = 1.0;
+            seat.container.scale.set(1.0);
+        });
+
+        if (this.deckInstance) this.deckInstance.view.alpha = 1.0;
+        if (this.viraCardUI) this.viraCardUI.alpha = 1.0;
+        this.lixoCardsUI.forEach(c => c.alpha = 1.0);
+
+        this.gameState.players.forEach((p: any) => {
+            if (p.uiCards) p.uiCards.forEach((c: any) => c.alpha = 1.0);
+        });
+        
+        this.winnerCardsUI.forEach(c => this.safeDestroy(c));
+        this.winnerCardsUI = [];
+    }
+
+    public showWinnerCards(winnerSeat: number, rawCards: string[]) {
+        if (!this.app || !this.deckInstance || !rawCards) return;
+
+        const suitOrder: Record<string, number> = { '♥': 1, '♠': 2, '♦': 3, '♣': 4 };
+        const rankOrder: Record<string, number> = { 'A': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 11, 'Q': 12, 'K': 13 };
+
+        let wildcardRank = -1;
+        let wildcardSuit = '';
+        if (this.gameState.viraCard) {
+            const vRank = this.gameState.viraCard.slice(0, -1);
+            wildcardSuit = this.gameState.viraCard.slice(-1);
+            const vVal = rankOrder[vRank];
+            wildcardRank = vVal === 13 ? 1 : vVal + 1; 
+        }
+
+        const wildcards: string[] = [];
+        const regularCards: string[] = [];
+
+        rawCards.forEach((c: string) => {
+            const rank = c.slice(0, -1);
+            const suit = c.slice(-1);
+            if (rankOrder[rank] === wildcardRank && suit === wildcardSuit) {
+                wildcards.push(c);
+            } else {
+                regularCards.push(c);
+            }
+        });
+
+        const sequences: string[][] = [];
+        ['♥', '♠', '♦', '♣'].forEach(suit => {
+            let suitCards = regularCards.filter(c => c.slice(-1) === suit);
+            suitCards.sort((a, b) => rankOrder[a.slice(0, -1)] - rankOrder[b.slice(0, -1)]);
+            let run: string[] = [];
+            for (let i = 0; i < suitCards.length; i++) {
+                if (run.length === 0) { run.push(suitCards[i]); } 
+                else {
+                    let lastRank = rankOrder[run[run.length - 1].slice(0, -1)];
+                    let currRank = rankOrder[suitCards[i].slice(0, -1)];
+                    if (currRank === lastRank + 1) { run.push(suitCards[i]); } 
+                    else if (currRank === lastRank) { continue; } 
+                    else {
+                        if (run.length >= 3) {
+                            sequences.push([...run]);
+                            run.forEach(c => { let idx = regularCards.indexOf(c); if(idx > -1) regularCards.splice(idx, 1); });
+                        }
+                        run = [suitCards[i]];
+                    }
+                }
+            }
+            if (run.length >= 3) {
+                sequences.push([...run]);
+                run.forEach(c => { let idx = regularCards.indexOf(c); if(idx > -1) regularCards.splice(idx, 1); });
+            }
+        });
+
+        const trincas: string[][] = [];
+        const rankGroups: Record<string, string[]> = {};
+        regularCards.forEach(c => {
+            const rank = c.slice(0, -1);
+            if (!rankGroups[rank]) rankGroups[rank] = [];
+            rankGroups[rank].push(c);
+        });
+        Object.keys(rankGroups).forEach(rank => {
+            if (rankGroups[rank].length >= 3) {
+                trincas.push([...rankGroups[rank]]);
+                rankGroups[rank].forEach(c => { let idx = regularCards.indexOf(c); if(idx > -1) regularCards.splice(idx, 1); });
+            }
+        });
+
+        regularCards.sort((a, b) => {
+            let rA = rankOrder[a.slice(0, -1)];
+            let rB = rankOrder[b.slice(0, -1)];
+            if (rA !== rB) return rA - rB;
+            return suitOrder[a.slice(-1)] - suitOrder[b.slice(-1)];
+        });
+
+        const groups: string[][] = [];
+        if (wildcards.length > 0) groups.push(wildcards);
+        sequences.forEach(s => groups.push(s));
+        trincas.forEach(t => groups.push(t));
+        if (regularCards.length > 0) groups.push(regularCards); 
+
+        const centerX = this.app.screen.width / 2;
+        const centerY = this.app.screen.height / 2;
+        const scale = this.CENTER_CARDS_SCALE * 0.9; 
+
+        const overlap = 25; 
+        const groupGap = 40; 
+        const cardW = 55; 
+
+        let totalWidth = 0;
+        groups.forEach((g, i) => {
+            totalWidth += (g.length - 1) * overlap;
+            if (i < groups.length - 1) totalWidth += groupGap;
+        });
+        totalWidth += cardW;
+
+        let currentX = centerX - (totalWidth / 2) + (cardW / 2);
+        let startY = centerY - 20; 
+
+        groups.forEach(g => {
+            g.forEach((cardStr) => {
+                const rank = cardStr.slice(0, -1) || "A";
+                const suit = cardStr.slice(-1) || "♠";
+                const cardSprite = this.deckInstance!.createCardToDeal(true, rank, suit);
+                
+                cardSprite.scale.set(scale);
+                cardSprite.x = this.seatCoords[winnerSeat]?.x || centerX;
+                cardSprite.y = this.seatCoords[winnerSeat]?.y || centerY;
+
+                this.cardLayer.addChild(cardSprite);
+                this.winnerCardsUI.push(cardSprite);
+
+                this.performAnimation(cardSprite, currentX, startY, 15);
+                
+                currentX += overlap;
+            });
+            currentX += groupGap - overlap;
         });
     }
 }

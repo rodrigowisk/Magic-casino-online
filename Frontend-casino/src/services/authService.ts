@@ -2,13 +2,14 @@
 const API_URL = `${import.meta.env.VITE_API_BASE_URL}/auth`;
 
 export const authService = {
-  async register(username: string, email: string, password: string, phone: string) {
+  // 👇 NOVO: Adicionado o referralCode opcional na assinatura e no body
+  async register(username: string, email: string, password: string, phone: string, referralCode?: string) {
     const response = await fetch(`${API_URL}/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ username, email, password, phone })
+      body: JSON.stringify({ username, email, password, phone, referralCode })
     });
 
     if (!response.ok) {
@@ -39,7 +40,7 @@ export const authService = {
     localStorage.setItem('magic_token', data.token);
     localStorage.setItem('magic_username', data.username);
     
-    // 👇 NOVO: Salva o avatar que veio do banco
+    // Salva o avatar que veio do banco
     if (data.avatar) {
       localStorage.setItem('magic_avatar', data.avatar);
     }
@@ -57,7 +58,7 @@ export const authService = {
     localStorage.removeItem('magic_token');
     localStorage.removeItem('magic_username');
     localStorage.removeItem('magic_userid');
-    localStorage.removeItem('magic_avatar'); // 👇 Limpa o avatar no logout
+    localStorage.removeItem('magic_avatar'); // Limpa o avatar no logout
   },
 
   isAuthenticated() {
@@ -76,7 +77,7 @@ export const authService = {
     return localStorage.getItem('magic_userid');
   },
 
-  // 👇 NOVO: Getter para o avatar
+  // Getter para o avatar
   getAvatar() {
     return localStorage.getItem('magic_avatar') || 'default.webp';
   }

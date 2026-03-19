@@ -28,8 +28,9 @@ services:
     image: rabbitmq:3-management-alpine
     container_name: magic_rabbitmq
     ports:
-      - "5672:5672"   # Porta de comunicação dos microsserviços
-      - "15672:15672" # Porta do painel de administração web
+      - "5673:5672"   # Porta de comunicação dos microsserviços
+      - "15673:15672" # Porta do painel de administração web
+
     environment:
       RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER}"
       RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASS}"

@@ -21,10 +21,7 @@ public class GameHub : Hub
 
     public async Task RegisterUser(string userId)
     {
-        if (!string.IsNullOrEmpty(userId))
-        {
-            await Groups.AddToGroupAsync(Context.ConnectionId, $"user_{userId}");
-        }
+        if (!string.IsNullOrEmpty(userId)) await Groups.AddToGroupAsync(Context.ConnectionId, $"user_{userId}");
     }
 
     public async Task JoinTable(string tableId, string localUserId, string localUserName, string avatar = "default.webp")
@@ -83,10 +80,7 @@ public class GameHub : Hub
             await Clients.Group(tableId).SendAsync("TableStateUpdated", _gameManager.GetOrCreateTable(tableId));
             await CheckAndBroadcastGameStart(tableId);
         }
-        else
-        {
-            await Clients.Caller.SendAsync("ReceiveError", "Falha ao sentar. Verifique o seu saldo.");
-        }
+        else await Clients.Caller.SendAsync("ReceiveError", "Falha ao sentar. Verifique o seu saldo.");
     }
 
     public async Task Rebuy(string tableId, decimal amount)
@@ -104,16 +98,23 @@ public class GameHub : Hub
             await Clients.Group(tableId).SendAsync("TableStateUpdated", _gameManager.GetOrCreateTable(tableId));
             await CheckAndBroadcastGameStart(tableId);
         }
-        else
+        else await Clients.Caller.SendAsync("ReceiveError", "Falha no rebuy. Verifique o seu saldo.");
+    }
+
+    // 👇 NOVA FUNÇÃO: O FRONTEND CHAMA ISSO QUANDO O JOGADOR CLICA EM "CONTINUAR" 👇
+    public async Task ReadyForNextRound(string tableId)
+    {
+        if (_gameManager.SetPlayerReady(tableId, Context.ConnectionId))
         {
-            await Clients.Caller.SendAsync("ReceiveError", "Falha no rebuy. Verifique o seu saldo.");
+            var tableState = _gameManager.GetOrCreateTable(tableId);
+            await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
+            await CheckAndBroadcastGameStart(tableId);
         }
     }
 
     public async Task StandUp(string tableId)
     {
         bool stoodUp = await _gameManager.StandUp(tableId, Context.ConnectionId);
-
         if (stoodUp)
         {
             var tableState = _gameManager.GetOrCreateTable(tableId);
@@ -121,7 +122,6 @@ public class GameHub : Hub
         }
     }
 
-    // 👇 AVISO CS1998 RESOLVIDO AQUI: Removido o "async" já que a função não precisava aguardar nada 👇
     public Task SetLeaveNextHand(string tableId, bool willLeave)
     {
         _gameManager.SetLeaveNextHand(tableId, Context.ConnectionId, willLeave);
@@ -135,10 +135,7 @@ public class GameHub : Hub
             var tableState = _gameManager.GetOrCreateTable(tableId);
             await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
         }
-        else
-        {
-            await Clients.Caller.SendAsync("ReceiveError", "Não é o seu turno ou movimento inválido.");
-        }
+        else await Clients.Caller.SendAsync("ReceiveError", "Não é o seu turno ou movimento inválido.");
     }
 
     public async Task DiscardCard(string tableId, string cardString)
@@ -148,14 +145,27 @@ public class GameHub : Hub
             var tableState = _gameManager.GetOrCreateTable(tableId);
             await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
 
-            if (roundEnded)
-            {
-                await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, 5000);
-            }
+            if (roundEnded) await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, 5000);
+        }
+        else await Clients.Caller.SendAsync("ReceiveError", "Movimento inválido. Você deve comprar antes de descartar.");
+    }
+
+    public async Task DeclareWin(string tableId, string cardToDiscard)
+    {
+        var connectionId = Context.ConnectionId;
+
+        if (_gameManager.DeclareWin(tableId, connectionId, cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups))
+        {
+            var table = _gameManager.GetOrCreateTable(tableId);
+            await Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+
+            await Clients.Group(tableId).SendAsync("PlayerWon", new { Seat = seat, Name = playerName, Groups = winningGroups });
+
+            _ = Task.Run(() => _gameManager.ProcessNextRoundLoop(tableId, true, 8000));
         }
         else
         {
-            await Clients.Caller.SendAsync("ReceiveError", "Movimento inválido. Você deve comprar antes de descartar.");
+            await Clients.Caller.SendAsync("ReceiveError", "Batida Recusada! Você não tem 3 jogos prontos na mão.");
         }
     }
 
@@ -184,7 +194,7 @@ public class GameHub : Hub
             lock (dealingState.Players)
             {
                 dealingState.Phase = "betting";
-                dealingState.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+                dealingState.TurnEndTime = DateTime.UtcNow.AddSeconds(60);
             }
             await Clients.Group(tableId).SendAsync("TableStateUpdated", dealingState);
         }

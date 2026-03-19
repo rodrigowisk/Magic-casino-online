@@ -2,105 +2,107 @@
   <div class="main-wrapper" ref="wrapperRef">
     <div class="game-container" :style="{ transform: `translate(-50%, -50%) scale(${gameScale})` }">
       
-      <div ref="pixiContainer" class="pixi-canvas"></div>
-      <div class="table-neon-aura"></div>
+      <GameLoading :visible="isAppLoading" />
 
-      <div class="leave-warning" v-if="isWaitingToLeave">
-        <span>Você levantará ao fim da mão</span>
-        <button @click="cancelLeaveNextHand">CANCELAR</button>
-      </div>
+      <div class="table-content-fader" :class="{ 'fade-in-content': !isAppLoading }">
+        <div ref="pixiContainer" class="pixi-canvas"></div>
+        <div class="table-neon-aura"></div>
 
-      <button class="hud-btn hud-top-left" @click="clicouMenu" title="Menu">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="3" y1="12" x2="21" y2="12"></line>
-          <line x1="3" y1="6" x2="21" y2="6"></line>
-          <line x1="3" y1="18" x2="21" y2="18"></line>
-        </svg>
-      </button>
-
-      <button class="hud-btn hud-top-right" @click="clicouEstatisticas" title="Estatísticas">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18 20V10"></path>
-          <path d="M12 20V4"></path>
-          <path d="M6 20v-6"></path>
-        </svg>
-      </button>
-
-      <button class="hud-btn hud-bottom-left" @click="clicouVerMaos" title="Histórico de Mãos">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="6" width="14" height="16" rx="2" ry="2"></rect>
-          <path d="M22 18V4a2 2 0 0 0-2-2H8"></path>
-        </svg>
-      </button>
-      
-      <div class="ui-layer">
-        <div class="controls-wrapper" v-if="gameState.phase === 'betting' && !isDealing && !isAnimating && gameState.players[gameState.currentTurn]?.isHero && gameState.players[gameState.currentTurn]?.status === 'playing'">
-          <BettingControls 
-            :minBet="Math.min(gameState.minBet, gameState.players[gameState.currentTurn]?.chips || gameState.minBet)"
-            :maxBet="Math.min(gameState.pot, gameState.players[gameState.currentTurn]?.chips || gameState.pot)"
-            @pular="invokeSkipBet"
-            @apostar="invokeConfirmBet"
-          />
+        <div class="leave-warning" v-if="isWaitingToLeave">
+          <span>Você levantará ao fim da mão</span>
+          <button @click="cancelLeaveNextHand">CANCELAR</button>
         </div>
-      </div>
 
-      <BuyInModal 
-        v-if="showBuyInModal"
-        :minBet="gameState.minBet"
-        :minBuyIn="gameState.tableMinBuyIn" 
-        :rake="gameState.rake"
-        :expiresAt="gameState.expiresAt"
-        :maxBalance="modalMaxBalance"
-        @cancel="cancelBuyIn"
-        @confirm="invokeBuyIn"
-      />
+        <button class="hud-btn hud-top-left" @click="clicouMenu" title="Menu">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
 
-      <RebuyModal 
-        v-if="showRebuyModal"
-        :minBuyIn="gameState.tableMinBuyIn"
-        :maxBalance="userTotalBalance"
-        @cancel="invokeStandUp"
-        @confirm="invokeRebuy"
-      />
+        <button class="hud-btn hud-top-right" @click="clicouEstatisticas" title="Estatísticas">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 20V10"></path>
+            <path d="M12 20V4"></path>
+            <path d="M6 20v-6"></path>
+          </svg>
+        </button>
 
-      <MeinhoMenu 
-        v-if="showMenuModal"
-        :animEnabled="animModeEnabled"
-        :peekEnabled="peekModeEnabled"
-        @close="showMenuModal = false"
-        @leave="handleMenuLeave"
-        @lobby="handleLobby"
-        @rules="handleMenuRules"
-        @settings="handleMenuSettings"
-        @toggleAnimation="handleToggleAnimation"
-        @togglePeek="handleTogglePeek"
-      />
+        <button class="hud-btn hud-bottom-left" @click="clicouVerMaos" title="Histórico de Mãos">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="6" width="14" height="16" rx="2" ry="2"></rect>
+            <path d="M22 18V4a2 2 0 0 0-2-2H8"></path>
+          </svg>
+        </button>
+        
+        <div class="ui-layer">
+          <div class="controls-wrapper" v-if="gameState.phase === 'betting' && !isDealing && !isAnimating && gameState.players[gameState.currentTurn]?.isHero && gameState.players[gameState.currentTurn]?.status === 'playing'">
+            <BettingControls 
+              :minBet="Math.min(gameState.minBet, gameState.players[gameState.currentTurn]?.chips || gameState.minBet)"
+              :maxBet="Math.min(gameState.pot, gameState.players[gameState.currentTurn]?.chips || gameState.pot)"
+              @pular="invokeSkipBet"
+              @apostar="invokeConfirmBet"
+            />
+          </div>
+        </div>
 
-      <MeinhoPeeker 
-        v-if="showPeekerModal"
-        ref="peekerRef"
-        :cards="heroCards"
-        @close="fecharPeekerERevelar"
-      />
+        <BuyInModal 
+          v-if="showBuyInModal"
+          :minBet="gameState.minBet"
+          :minBuyIn="gameState.tableMinBuyIn" 
+          :rake="gameState.rake"
+          :expiresAt="gameState.expiresAt"
+          :maxBalance="modalMaxBalance"
+          @cancel="cancelBuyIn"
+          @confirm="invokeBuyIn"
+        />
 
-      <HandHistoryModal 
-        v-if="showHandHistoryModal"
-        :isOpen="showHandHistoryModal"
-        @update:isOpen="showHandHistoryModal = $event"
-        :history="sessionHandHistory"
-        :currentUserId="currentUserId"
-      />
+        <RebuyModal 
+          v-if="showRebuyModal"
+          :minBuyIn="gameState.tableMinBuyIn"
+          :maxBalance="userTotalBalance"
+          @cancel="invokeStandUp"
+          @confirm="invokeRebuy"
+        />
 
-      <TableStatsModal 
-        v-if="showStatsModal"
-        :isOpen="showStatsModal"
-        :players="gameState.players"
-        @update:isOpen="showStatsModal = $event"
-      />
+        <MeinhoMenu 
+          v-if="showMenuModal"
+          :animEnabled="animModeEnabled"
+          :peekEnabled="peekModeEnabled"
+          @close="showMenuModal = false"
+          @leave="handleMenuLeave"
+          @lobby="handleLobby"
+          @rules="handleMenuRules"
+          @settings="handleMenuSettings"
+          @toggleAnimation="handleToggleAnimation"
+          @togglePeek="handleTogglePeek"
+        />
 
-      <BottomNav class="game-bottom-nav" />
+        <transition name="fade-peeker">
+          <MeinhoPeeker 
+            v-if="showPeekerModal"
+            ref="peekerRef"
+            :cards="heroCards"
+            @close="fecharPeekerERevelar"
+          />
+        </transition>
 
-    </div>
+        <HandHistoryModal 
+          v-if="showHandHistoryModal"
+          :isOpen="showHandHistoryModal"
+          @update:isOpen="showHandHistoryModal = $event"
+          :history="sessionHandHistory"
+          :currentUserId="currentUserId"
+        />
+
+        <TableStatsModal 
+          v-if="showStatsModal"
+          :isOpen="showStatsModal"
+          :players="gameState.players"
+          @update:isOpen="showStatsModal = $event"
+        />
+      </div></div>
 
     <div class="table-id-footer">
       ID da Mesa: {{ tableId }}
@@ -112,7 +114,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router'; 
-import * as PIXI from 'pixi.js';
+
+import GameLoading from '../components/Meinho/GameLoading.vue';
 
 import { MeinhoPixiEngine } from '../Game/Meinho/MeinhoPixiEngine';
 import { useGameHub } from '../composables/useGameHub';
@@ -139,6 +142,8 @@ const GAME_HEIGHT = 900;
 const gameScale = ref(1);
 const wrapperRef = ref<HTMLElement | null>(null);
 
+const isAppLoading = ref(true);
+
 const peekerRef = ref<any>(null);
 const isDiscarding3D = ref(false);
 
@@ -156,6 +161,8 @@ const myLastChips = ref(0);
 
 const showBuyInModal = ref(false);
 const pendingSitSeat = ref(-1);
+// 🔥 NOVO: Variável para a mesa saber em qual cadeira você tentou sentar!
+const expectedHeroLogicalSeat = ref(-1); 
 
 const showRebuyModal = ref(false);
 const showMenuModal = ref(false);
@@ -167,7 +174,7 @@ const showHandHistoryModal = ref(false);
 const sessionHandHistory = ref<any[]>([]); 
 
 const animModeEnabled = ref(localStorage.getItem('magic_anim_enabled') !== '0'); 
-const peekModeEnabled = ref(localStorage.getItem('magic_peek_enabled') === '1'); 
+const peekModeEnabled = ref(localStorage.getItem('magic_peek_enabled') !== '0'); 
 
 const hasPeekedCurrentHand = ref(false); 
 const hasManuallyRevealedCards = ref(false); 
@@ -219,7 +226,6 @@ const gameState = reactive<GameState>({
   players: []
 });
 
-// 👇 COMPUTED: Regra do Modal Travado no Mínimo se tiver perdendo
 const modalMaxBalance = computed(() => {
     if (myLastChips.value > 0 && myLastChips.value < gameState.tableMinBuyIn) {
         return gameState.tableMinBuyIn; 
@@ -272,13 +278,27 @@ const verificarAberturaFilar = () => {
     
     if (peekTimeoutId) clearTimeout(peekTimeoutId);
 
-    peekTimeoutId = setTimeout(() => {
-      if (!hasManuallyRevealedCards.value && hero.status === 'playing') {
+    const tryOpenPeeker = () => {
+      if (!hasManuallyRevealedCards.value && hero && hero.status === 'playing') {
         showPeekerModal.value = true;
       }
-    }, 1200);
+    };
+
+    // 👇 SOLUÇÃO: Espera distribuição E animações da engine terminarem!
+    if (isDealing.value || isAnimating.value) {
+      const unwatch = watch([() => isDealing.value, () => isAnimating.value], ([dealing, animating]) => {
+        if (!dealing && !animating) {
+          // 800ms de respiro para as cartas "assentarem" na mesa antes de aparecer o botão
+          peekTimeoutId = setTimeout(tryOpenPeeker, 800); 
+          unwatch(); 
+        }
+      });
+    } else {
+      peekTimeoutId = setTimeout(tryOpenPeeker, 800);
+    }
   }
 };
+
 
 watch(() => peekModeEnabled.value, (ligado) => {
   engine.setPeekMode(ligado);
@@ -286,6 +306,10 @@ watch(() => peekModeEnabled.value, (ligado) => {
 });
 
 watch(() => gameState.phase, (newPhase, oldPhase) => {
+  if (engine && typeof engine.updateDeckVisibility === 'function') {
+        engine.updateDeckVisibility();
+    }
+    
     if (newPhase === 'waiting' && oldPhase !== 'waiting') {
         if (isWaitingToLeave.value) {
             invokeStandUp();
@@ -345,6 +369,9 @@ async function fetchUserBalance() {
   }
 }
 
+// ============================================================================
+// CONFIGURAÇÃO DO GAME HUB COM OS EFEITOS (E MEMÓRIA DE CADEIRA)
+// ============================================================================
 const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvatar, {
     onReceiveTableState: (serverState: any) => syncTable(serverState),
     onPlayerSkipped: async (logicalSeat: number) => {
@@ -376,8 +403,33 @@ const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvata
     },
     onWalletBalanceUpdated: (newBalance: number) => {
         userTotalBalance.value = newBalance;
+    },
+    
+    // 👇 EVENTOS MÁGICOS CORRIGIDOS PARA O HERÓI 👇
+    onPlayerSatDown: (logicalSeat: number) => {
+        let offsetToUse = myLogicalSeatOffset.value;
+        
+        // Se fomos nós que acabamos de clicar, antecipamos o giro da mesa!
+        if (logicalSeat === expectedHeroLogicalSeat.value) {
+            offsetToUse = logicalSeat;
+            myLogicalSeatOffset.value = logicalSeat; 
+            expectedHeroLogicalSeat.value = -1; // Limpa a memória
+        }
+
+        const visualSeat = (logicalSeat - offsetToUse + gameState.maxPlayers) % gameState.maxPlayers;
+        
+        if (typeof (engine as any).playSitEffect === 'function') {
+            (engine as any).playSitEffect(visualSeat);
+        }
+    },
+    onPlayerStoodUp: (logicalSeat: number) => {
+        const visualSeat = (logicalSeat - myLogicalSeatOffset.value + gameState.maxPlayers) % gameState.maxPlayers;
+        if (typeof (engine as any).playStandEffect === 'function') {
+            (engine as any).playStandEffect(visualSeat);
+        }
     }
 });
+// ============================================================================
 
 const engine = new MeinhoPixiEngine(gameState, {
     setDealing: (v) => isDealing.value = v,
@@ -392,18 +444,21 @@ const engine = new MeinhoPixiEngine(gameState, {
         
         const minBuyIn = gameState.tableMinBuyIn;
 
-        // 👇 REGRA 1 APLICADA: Empatou ou Ganhou? Senta direto sem modal!
         if (myLastChips.value >= minBuyIn) {
+            // 🔥 MARCA A CADEIRA QUE VOCÊ CLICOU NA MEMÓRIA 🔥
+            expectedHeroLogicalSeat.value = logicalSeat; 
             gameHub.sitDown(logicalSeat, myLastChips.value).then(() => {
                 fetchUserBalance();
                 if (!sessionStartTime.value) {
                     sessionStartTime.value = new Date().toISOString(); 
                 }
-            }).catch(e => console.error("Erro ao sentar automaticamente:", e));
+            }).catch(e => {
+                console.error("Erro ao sentar automaticamente:", e);
+                expectedHeroLogicalSeat.value = -1; // Limpa em caso de erro
+            });
             return;
         }
 
-        // Casos 2 e 3: Vai abrir o modal (ou livre, ou travado no mínimo)
         pendingSitSeat.value = logicalSeat;
         showBuyInModal.value = true;
     }
@@ -414,10 +469,17 @@ function invokeBuyIn(amount: number) {
         const seatToSit = pendingSitSeat.value; 
         showBuyInModal.value = false;
         pendingSitSeat.value = -1;
+        
+        // 🔥 MARCA A CADEIRA QUE VOCÊ CLICOU NA MEMÓRIA 🔥
+        expectedHeroLogicalSeat.value = seatToSit; 
+
         gameHub.sitDown(seatToSit, amount).then(() => {
             fetchUserBalance();
             sessionStartTime.value = new Date().toISOString();
-        }).catch(e => console.error("Erro ao sentar:", e));
+        }).catch(e => {
+            console.error("Erro ao sentar:", e);
+            expectedHeroLogicalSeat.value = -1; // Limpa em caso de erro
+        });
     }
 }
 
@@ -786,6 +848,10 @@ onMounted(async () => {
     } catch(e) { console.error(e); }
   }
   await gameHub.connect();
+
+  setTimeout(() => {
+    isAppLoading.value = false;
+  }, 2800);
 });
 
 onUnmounted(() => {
@@ -799,6 +865,32 @@ onUnmounted(() => {
 <style scoped>
 .main-wrapper { position: relative; width: 100vw; min-height: 100vh; min-height: 100dvh; background-color: #000; box-sizing: border-box; background-image: radial-gradient(circle at 50% 50%, #151e32 0%, #0a0f18 100%); overflow: hidden; }
 .game-container { position: absolute; top: 50%; left: 50%; width: 430px; height: 900px; transform-origin: center center; border-radius: 20px; overflow: hidden; border: 2px solid #a855f7; box-shadow: 0 10px 40px rgba(0,0,0,0.8), 0 0 25px rgba(168, 85, 247, 0.6), inset 0 0 15px rgba(168, 85, 247, 0.4); background-color: #1a2639; }
+
+.table-content-fader {
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transform: scale(0.95);
+  transition: opacity 1s ease-out, transform 1.2s cubic-bezier(0.165, 0.84, 0.44, 1);
+  pointer-events: none; 
+}
+
+.fade-in-content {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto; 
+}
+
+/* Efeito de Fade para o botão de Mostrar Cartas */
+.fade-peeker-enter-active,
+.fade-peeker-leave-active {
+  transition: opacity 0.6s ease-in-out;
+}
+.fade-peeker-enter-from,
+.fade-peeker-leave-to {
+  opacity: 0;
+}
+
 .pixi-canvas { position: absolute; top: 0; left: 0; width: 430px; height: 900px; z-index: 2; pointer-events: auto !important; }
 .table-neon-aura { position: absolute; top: 0; left: 0; width: 430px; height: 900px; background: radial-gradient(ellipse at 50% 45%, rgba(0, 243, 255, 0.15) 0%, rgba(168, 85, 247, 0.15) 35%, transparent 65%); pointer-events: none !important; z-index: 3; mix-blend-mode: screen; }
 .ui-layer { position: absolute; top: 0; left: 0; width: 430px; height: 900px; z-index: 300; pointer-events: none !important; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; padding: 40px 0 15px 0; box-sizing: border-box; }

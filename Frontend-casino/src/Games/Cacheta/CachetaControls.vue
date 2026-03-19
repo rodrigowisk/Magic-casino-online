@@ -22,8 +22,17 @@
 
     <div class="action-buttons" v-else>
       <div class="discard-hint" v-if="!selectedCard">
-        Selecione uma carta na mão para descartar
+        Selecione a carta para descartar ou bater direto
       </div>
+
+      <button 
+        class="action-btn bater-btn" 
+        @click="$emit('declareWin', selectedCard)"
+        title="Bater na mesa (Vitória)"
+      >
+        <span class="btn-text">🏆 BATER</span>
+      </button>
+
       <button 
         class="action-btn discard-btn" 
         :disabled="!selectedCard"
@@ -46,7 +55,7 @@ const props = defineProps<{
   selectedCard: string | null; 
 }>();
 
-defineEmits(['draw', 'discard']);
+defineEmits(['draw', 'discard', 'declareWin']);
 </script>
 
 <style scoped>
@@ -102,6 +111,7 @@ defineEmits(['draw', 'discard']);
   cursor: not-allowed;
   text-shadow: none;
   box-shadow: none;
+  animation: none; 
 }
 
 .lixo-btn {
@@ -114,10 +124,30 @@ defineEmits(['draw', 'discard']);
   border: 1px solid #1a5276;
 }
 
+/* 👇 ESTILO DO BOTÃO DE BATER 👇 */
+.bater-btn {
+  background: linear-gradient(135deg, #ff0055, #ffaa00);
+  border: 1px solid #ff0055;
+  width: 120px;
+  animation: pulseBater 1.5s infinite;
+}
+
+.bater-btn .btn-text {
+  font-size: 15px;
+  font-weight: 900;
+  text-shadow: 1px 1px 3px rgba(0,0,0,0.9);
+}
+
+@keyframes pulseBater {
+  0% { box-shadow: 0 0 5px rgba(255, 0, 85, 0.4); }
+  50% { box-shadow: 0 0 20px rgba(255, 0, 85, 0.8), inset 0px 2px 2px rgba(255,255,255,0.4); }
+  100% { box-shadow: 0 0 5px rgba(255, 0, 85, 0.4); }
+}
+
 .discard-btn {
   background: linear-gradient(to bottom, #e74c3c, #c0392b);
   border: 1px solid #922b21;
-  width: 160px; 
+  width: 140px; 
 }
 
 .discard-btn .btn-text {

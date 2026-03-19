@@ -2,7 +2,7 @@
   <div class="screen-wrapper">
     <div class="create-box">
       <div class="header-area">
-        <button class="btn-back" @click="voltar">← Voltar</button>
+        <button class="btn-back" @click="voltar">← Voltar ao Lobby</button>
         <h2>Nova Mesa de Cacheta</h2>
       </div>
 
@@ -78,8 +78,7 @@ const form = reactive({
   durationHours: 12, 
   maxPlayers: 6,
   rake: 5,
-  password: '',
-  gameType: 'cacheta' // 👇 Identifica o jogo para o Backend da Cacheta
+  password: ''
 });
 
 const isLoading = ref(false);
@@ -100,7 +99,6 @@ const criarMesa = async () => {
       return;
     }
 
-    // 👇 Aponta para a API da Cacheta
     const CACHETA_API_URL = import.meta.env.VITE_CACHETA_API_URL || 'http://localhost:5003';
 
     const payload = {
@@ -111,7 +109,7 @@ const criarMesa = async () => {
         maxPlayers: form.maxPlayers,
         rake: form.rake, 
         password: form.password,
-        gameType: form.gameType 
+        gameType: "cacheta"
     };
 
     const response = await fetch(`${CACHETA_API_URL}/api/table`, {
@@ -124,45 +122,61 @@ const criarMesa = async () => {
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.title || errorData.message || 'Erro ao criar a mesa. Verifique os dados.');
+      const errorText = await response.text(); 
+      console.error("❌ ERRO COMPLETO DO SERVIDOR:", errorText);
+      
+      if (response.status === 502) {
+         throw new Error("Erro 502: O Nginx não está redirecionando para a porta 5003.");
+      }
+      if (response.status === 404) {
+         throw new Error("Erro 404: Rota /api/table não encontrada. Nginx ou API offline.");
+      }
+      
+      try {
+         const errorData = JSON.parse(errorText);
+         throw new Error(errorData.title || errorData.message || `Erro HTTP ${response.status}`);
+      } catch(e) {
+         throw new Error(`Falha no Servidor (${response.status}). Veja o Console (F12).`);
+      }
     }
 
     const data = await response.json();
     successMessage.value = 'Mesa criada com sucesso! A redirecionar...';
 
     setTimeout(() => {
-      // Redireciona para o Lobby da Cacheta
-      router.push('/lobby-cacheta');
-    }, 2000);
+      router.push(`/mesa-cacheta/${data.tableId}`);
+    }, 1500);
 
   } catch (error: any) {
     errorMessage.value = error.message || 'Erro de conexão com o servidor.';
-    console.error(error);
   } finally {
     isLoading.value = false;
   }
 };
 
 const voltar = () => {
-  router.back();
+  // Agora navega de volta ao lobby por ser uma rota
+  router.push('/lobby');
 };
 </script>
 
 <style scoped>
 .screen-wrapper {
+  position: relative;
   width: 100vw;
-  height: 100vh;
+  min-height: 100vh;
   display: flex;
   justify-content: center;
   align-items: center;
-  background-color: #000;
+  background-color: #0a0f18; /* Removido o transparente para atuar como página própria */
   background-image: radial-gradient(circle at 50% 50%, #151e32 0%, #0a0f18 100%);
   font-family: Arial, sans-serif;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
 .create-box {
-  width: 90%;
+  width: 100%;
   max-width: 450px;
   background: rgba(10, 15, 24, 0.95);
   border: 2px solid #f1c40f; 
@@ -190,6 +204,10 @@ const voltar = () => {
   color: #aaa;
   cursor: pointer;
   font-weight: bold;
+}
+
+.btn-back:hover {
+  color: #fff;
 }
 
 .create-form {

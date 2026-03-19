@@ -5,12 +5,21 @@
         <img :src="getAvatarUrl(currentAvatar)" alt="Avatar" class="profile-avatar" />
         <div class="edit-badge">✏️</div>
       </div>
-      <div>
-        <h3>{{ currentUser }}</h3>
-        <p class="balance">{{ balance }}</p>
-      </div>
+      <h3>{{ currentUser }}</h3>
     </div>
-    <button class="btn-logout" @click="sair">Sair</button>
+
+    <div class="header-right">
+      <div class="balance-pill">
+        {{ balance }}
+      </div>
+      <button class="btn-logout-icon" @click="sair" title="Sair">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+          <polyline points="16 17 21 12 16 7"></polyline>
+          <line x1="21" y1="12" x2="9" y2="12"></line>
+        </svg>
+      </button>
+    </div>
   </header>
 
   <div class="avatar-modal-overlay" v-if="showAvatarModal" @click.self="fecharModalAvatar">
@@ -174,17 +183,16 @@ const sair = () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px;
+  padding: 15px 40px; /* Ajustado para alinhar com o content-area no Desktop */
   background: rgba(17, 17, 17, 0.6);
   border-bottom: 1px solid #222; 
   box-sizing: border-box;
-  border-radius: 18px 18px 0 0; 
 }
 
 .user-info {
   display: flex;
   align-items: center;
-  gap: 15px;
+  gap: 12px;
 }
 
 .avatar-wrapper {
@@ -233,28 +241,54 @@ const sair = () => {
   color: white;
 }
 
-.balance {
-  margin: 0;
-  color: #3ce48a; 
-  font-weight: bold;
-  font-size: 14px;
+/* Área Direita (Saldo + Sair) */
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 15px;
 }
 
-.btn-logout {
-  background: rgba(231, 76, 60, 0.1);
-  border: 1px solid #e74c3c;
+/* Pílula de Saldo */
+.balance-pill {
+  background: rgba(60, 228, 138, 0.15);
+  border: 1px solid rgba(60, 228, 138, 0.5);
+  color: #3ce48a;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-weight: 900;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  box-shadow: 0 0 10px rgba(60, 228, 138, 0.1);
+}
+
+/* Ícone de Sair */
+.btn-logout-icon {
+  background: transparent;
+  border: none;
   color: #e74c3c;
-  padding: 8px 15px;
+  padding: 6px;
   border-radius: 8px;
   cursor: pointer;
-  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: all 0.2s;
 }
 
-.btn-logout:active {
+.btn-logout-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.btn-logout-icon:hover {
+  background: rgba(231, 76, 60, 0.15);
+  box-shadow: 0 0 10px rgba(231, 76, 60, 0.3);
+  transform: scale(1.05);
+}
+
+.btn-logout-icon:active {
   transform: scale(0.95);
-  background: #e74c3c;
-  color: white;
 }
 
 /* === MODAL DE AVATAR === */
@@ -390,5 +424,25 @@ const sair = () => {
 .btn-cancel:hover {
   background: #333;
   color: #fff;
+}
+
+/* Responsividade Básica para Celulares e alinhamento com o Layout */
+@media (max-width: 768px) {
+  .app-header {
+    padding: 15px 15px; /* Ajustado para alinhar com o content-area no Mobile */
+  }
+}
+
+@media (max-width: 400px) {
+  .user-info h3 {
+    font-size: 14px;
+  }
+  .balance-pill {
+    padding: 4px 10px;
+    font-size: 12px;
+  }
+  .header-right {
+    gap: 8px;
+  }
 }
 </style>

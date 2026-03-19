@@ -30,7 +30,6 @@ public class GameTable
     [Column("min_buyin")]
     public decimal MinBuyIn { get; set; }
 
-    // 👇 ALTERADO PARA HORAS 👇
     [Column("duration_hours")]
     public int DurationHours { get; set; }
 
@@ -46,4 +45,9 @@ public class GameTable
 
     [Column("game_type")]
     public string GameType { get; set; } = string.Empty;
+
+    // 👇 NOVO: Coluna no banco para salvar a imagem
+    [MaxLength(255)]
+    [Column("cover_image")]
+    public string CoverImage { get; set; } = "casino.webp";
 }

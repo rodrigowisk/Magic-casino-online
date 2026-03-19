@@ -21,6 +21,9 @@ public class TableState
     public decimal MinBuyIn { get; set; } = 100;
     public DateTime ExpiresAt { get; set; }
 
+    // 👇 NOVO: Guarda a capa da mesa na memória
+    public string CoverImage { get; set; } = "casino.webp";
+
     public List<PlayerState> Players { get; set; } = new();
 }
 
@@ -39,7 +42,6 @@ public class PlayerState
     public decimal TotalCashOut { get; set; } = 0;
     public DateTime LastActiveAt { get; set; } = DateTime.UtcNow;
 
-    // 👇 NOVA: Guarda as fichas do jogador no momento que ele levantou
     public decimal LastChips { get; set; } = 0;
 
     public bool IsSeated { get; set; } = false;

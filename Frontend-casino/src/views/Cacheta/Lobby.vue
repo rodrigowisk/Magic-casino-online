@@ -1,98 +1,184 @@
 <template>
   <div class="screen-wrapper">
-    <div class="lobby-box">
+    <div class="global-lobby-container">
+      
       <div class="header-area">
-        <button class="btn-back" @click="router.push('/lobby')">← Voltar pro Meinho</button>
-        <h2>Lobby - Cacheta</h2>
-        <button class="btn-create" @click="router.push('/criar-mesa-cacheta')">+ Criar Mesa</button>
+        <div class="header-titles">
+          <h2>Lobby Principal</h2>
+          <span class="subtitle">Escolha seu jogo e divirta-se</span>
+        </div>
+        <div class="header-actions">
+          <button class="btn-create" @click="router.push('/criar-mesa')">+ Criar Mesa</button>
+        </div>
       </div>
 
       <div v-if="isLoading" class="loading-state">
-        Buscando mesas de Cacheta...
+        <div class="loader-spin"></div>
+        <p>Carregando o salão de jogos...</p>
       </div>
 
       <div v-else-if="errorMessage" class="error-message">
         {{ errorMessage }}
       </div>
 
-      <div v-else-if="tables.length === 0" class="empty-state">
-        Nenhuma mesa de Cacheta ativa no momento.<br>
-        <span class="sub-text">Seja o primeiro a criar uma!</span>
-      </div>
+      <div v-else class="games-feed">
+        
+        <div class="game-section">
+          <div v-if="mappedCachetaTables.length === 0" class="empty-state">
+            <p>Nenhuma mesa de Cacheta ativa no momento.</p>
+          </div>
+          <template v-else>
+            <LobbyCarousel 
+              v-if="featuredCachetaTables.length > 0"
+              title="🔥 Cacheta: Destaques" 
+              :rooms="featuredCachetaTables" 
+              :processing-id="processingId"
+              view-all-type="cacheta-featured"
+              @enter="entrarNaCacheta"
+            />
 
-      <div v-else class="tables-list">
-        <div 
-          v-for="table in tables" 
-          :key="table.id" 
-          class="table-card" 
-          @click="entrarNaMesa(table)"
-        >
-          <div class="table-info">
-            <div class="table-name">
-              <span v-if="table.hasPassword" class="lock-icon">🔒</span>
-              {{ table.name }}
-            </div>
-            <div class="table-details">
-              <span><strong>Buy-in:</strong> R$ {{ table.minBuyIn }}</span>
-              <span><strong>Ante:</strong> R$ {{ table.ante }}</span>
-              <span><strong>Rake:</strong> {{ table.rake }}%</span>
-            </div>
-          </div>
-          <div class="table-players">
-            <div class="players-count" :class="{ 'full': table.currentPlayers >= table.maxPlayers }">
-              👥 {{ table.currentPlayers }} / {{ table.maxPlayers }}
-            </div>
-            <button class="btn-play">JOGAR</button>
-          </div>
+            <LobbyCarousel 
+              title="🃏 Cacheta: Todas as Mesas" 
+              :rooms="mappedCachetaTables" 
+              :processing-id="processingId"
+              @enter="entrarNaCacheta"
+            />
+          </template>
         </div>
+
+        <div class="divider"></div>
+
+        <div class="game-section">
+          <div v-if="meinhoRooms.length === 0" class="empty-state">
+            <p>Nenhuma sala de Meinho ativa no momento.</p>
+          </div>
+          <template v-else>
+            <LobbyCarousel 
+              title="🎴 Meinho: Salas Abertas" 
+              :rooms="meinhoRooms" 
+              :processing-id="processingId"
+              @enter="entrarNoMeinho"
+            />
+          </template>
+        </div>
+
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
+import LobbyCarousel from '../../components/LobbyCarousel.vue';
 
 const router = useRouter();
-const tables = ref<any[]>([]);
+
+// Estados Globais
 const isLoading = ref(true);
 const errorMessage = ref('');
+const processingId = ref<number | null>(null);
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+
+// Estados Específicos dos Jogos
+const cachetaTablesRaw = ref<any[]>([]);
+const meinhoRooms = ref<any[]>([]);
 
 const CACHETA_API_URL = import.meta.env.VITE_CACHETA_API_URL || 'https://cacheta.magic-casino.online';
 
-const fetchTables = async () => {
+// =======================================================================
+// FETCH DATA (BUSCA DE DADOS)
+// =======================================================================
+const fetchAllGames = async () => {
   try {
     const token = localStorage.getItem('magic_token');
-    if (!token) return;
+    if (!token) {
+      errorMessage.value = "Usuário não autenticado.";
+      isLoading.value = false;
+      return;
+    }
 
-    const response = await fetch(`${CACHETA_API_URL}/api/table`, {
-      headers: {
-        'Authorization': `Bearer ${token}`
-      }
+    // Busca Cacheta
+    const cachetaResponse = await fetch(`${CACHETA_API_URL}/api/table`, {
+      headers: { 'Authorization': `Bearer ${token}` }
     });
+    
+    if (cachetaResponse.ok) {
+      cachetaTablesRaw.value = await cachetaResponse.json();
+    }
 
-    if (!response.ok) throw new Error('Falha ao carregar mesas.');
-    tables.value = await response.json();
+    // MOCK DE MEINHO (Apenas para o visual funcionar enquanto a API não é ligada)
+    if (meinhoRooms.value.length === 0) {
+      meinhoRooms.value = [
+         { id: 901, name: "Meinho dos Cria", description: "Sala amigável", participantsCount: 2, maxParticipants: 6, entryFee: 10, prizePool: 60, mode: "MEINHO", startDate: new Date().toISOString(), endDate: new Date(Date.now() + 86400000).toISOString(), isJoined: false, isFavorite: true },
+         { id: 902, name: "High Stakes VIP", description: "Só para os fortes", participantsCount: 6, maxParticipants: 6, entryFee: 500, prizePool: 3000, mode: "MEINHO", startDate: new Date().toISOString(), endDate: new Date(Date.now() + 86400000).toISOString(), isJoined: false, isFavorite: false }
+      ];
+    }
+
     errorMessage.value = '';
   } catch (error: any) {
-    errorMessage.value = "Erro ao conectar com o servidor da Cacheta.";
+    errorMessage.value = "Erro ao conectar com os servidores de jogo.";
     console.error(error);
   } finally {
     isLoading.value = false;
   }
 };
 
-const entrarNaMesa = (table: any) => {
-  // Se tiver senha, no futuro você pode abrir um modal aqui pedindo a senha
-  // Por enquanto, apenas redireciona para a mesa da Cacheta
-  router.push(`/mesa-cacheta/${table.id}`);
+// =======================================================================
+// ADAPTAÇÃO DE DADOS (CACHETA -> LOBBY CARDS)
+// =======================================================================
+const mappedCachetaTables = computed(() => {
+  return cachetaTablesRaw.value.map(table => {
+    const startDate = new Date(Date.now() - 3600000).toISOString(); 
+    const endDate = new Date(Date.now() + 86400000).toISOString(); 
+
+    return {
+      id: table.id,
+      name: table.hasPassword ? `🔒 ${table.name}` : table.name,
+      description: `Mesa de Cacheta. Ante: R$ ${table.ante} | Rake: ${table.rake}%`,
+      participantsCount: table.currentPlayers,
+      maxParticipants: table.maxPlayers,
+      entryFee: table.minBuyIn,
+      prizePool: table.minBuyIn * table.currentPlayers, 
+      mode: 'CACHETA',
+      startDate: startDate,
+      endDate: endDate,
+      isJoined: false, 
+      isFavorite: false,
+      hasPassword: table.hasPassword
+    };
+  });
+});
+
+const featuredCachetaTables = computed(() => {
+  return mappedCachetaTables.value.filter(room => room.participantsCount > 0);
+});
+
+// =======================================================================
+// AÇÕES DE ROTEAMENTO (SEPARADAS POR JOGO)
+// =======================================================================
+const entrarNaCacheta = (roomId: number) => {
+  processingId.value = roomId;
+  setTimeout(() => {
+    router.push(`/mesa-cacheta/${roomId}`);
+    processingId.value = null;
+  }, 600);
 };
 
+const entrarNoMeinho = (roomId: number) => {
+  processingId.value = roomId;
+  setTimeout(() => {
+    router.push(`/lobby/${roomId}`); 
+    processingId.value = null;
+  }, 600);
+};
+
+// =======================================================================
+// LIFECYCLE
+// =======================================================================
 onMounted(() => {
-  fetchTables();
-  pollInterval = setInterval(fetchTables, 5000); // Atualiza a lista a cada 5 segundos
+  fetchAllGames();
+  pollInterval = setInterval(fetchAllGames, 5000); 
 });
 
 onUnmounted(() => {
@@ -109,177 +195,147 @@ onUnmounted(() => {
   align-items: center;
   background-color: #000;
   background-image: radial-gradient(circle at 50% 50%, #151e32 0%, #0a0f18 100%);
-  font-family: Arial, sans-serif;
+  font-family: 'Montserrat', Arial, sans-serif;
+  overflow: hidden;
 }
 
-.lobby-box {
-  width: 95%;
-  max-width: 600px;
-  height: 85vh;
-  background: rgba(10, 15, 24, 0.95);
-  border: 2px solid #38bdf8; /* Azul claro para diferenciar da Cacheta */
-  border-radius: 20px;
-  padding: 20px;
-  box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+.global-lobby-container {
+  width: 100vw;
+  max-width: 1400px;
+  height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 40px;
+}
+
+/* Scrollbar invisível/elegante para o container principal */
+.global-lobby-container::-webkit-scrollbar {
+  width: 8px;
+}
+.global-lobby-container::-webkit-scrollbar-thumb {
+  background: #38bdf8;
+  border-radius: 4px;
 }
 
 .header-area {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
-  padding-bottom: 15px;
-  border-bottom: 1px solid rgba(255,255,255,0.1);
+  padding: 30px 40px 20px 40px;
+  background: linear-gradient(to bottom, rgba(10, 15, 24, 0.95), transparent);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  backdrop-filter: blur(10px);
 }
 
-.header-area h2 {
+.header-titles h2 {
   color: #fff;
   margin: 0;
-  font-size: 22px;
+  font-size: 28px;
+  text-transform: uppercase;
+  font-weight: 900;
+  letter-spacing: 1px;
+  text-shadow: 0 2px 10px rgba(56, 189, 248, 0.5);
 }
 
-.btn-back {
-  background: none;
-  border: none;
+.header-titles .subtitle {
   color: #94a3b8;
-  cursor: pointer;
-  font-weight: bold;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .btn-create {
   background: linear-gradient(to bottom, #38bdf8, #0284c7);
   border: 1px solid #0c4a6e;
   color: white;
-  padding: 8px 16px;
+  padding: 10px 20px;
   border-radius: 8px;
-  font-weight: bold;
+  font-weight: 900;
+  text-transform: uppercase;
+  font-size: 14px;
   cursor: pointer;
-  box-shadow: 0px 4px 6px rgba(0,0,0,0.4);
-  transition: transform 0.1s;
+  box-shadow: 0px 4px 15px rgba(2, 132, 199, 0.5);
+  transition: all 0.2s;
 }
 
-.btn-create:active {
-  transform: translateY(2px);
-}
-
-.tables-list {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding-right: 5px;
-}
-
-.tables-list::-webkit-scrollbar {
-  width: 6px;
-}
-.tables-list::-webkit-scrollbar-thumb {
-  background: #38bdf8;
-  border-radius: 4px;
-}
-
-.table-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  padding: 15px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  cursor: pointer;
-  transition: background 0.2s, transform 0.1s;
-}
-
-.table-card:hover {
-  background: rgba(56, 189, 248, 0.1);
-  border-color: rgba(56, 189, 248, 0.3);
+.btn-create:hover {
+  filter: brightness(1.2);
   transform: translateY(-2px);
 }
 
-.table-info {
+.games-feed {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 20px;
+  padding: 0 20px;
 }
 
-.table-name {
-  color: #fff;
-  font-size: 16px;
-  font-weight: bold;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.lock-icon {
-  font-size: 12px;
-}
-
-.table-details {
-  display: flex;
-  gap: 15px;
-  color: #94a3b8;
-  font-size: 12px;
-}
-
-.table-details strong {
-  color: #cbd5e1;
-}
-
-.table-players {
+.game-section {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
+  gap: 20px;
 }
 
-.players-count {
-  background: #1e293b;
-  color: #38bdf8;
-  padding: 4px 10px;
-  border-radius: 20px;
-  font-size: 12px;
-  font-weight: bold;
-  border: 1px solid #0f172a;
-}
-
-.players-count.full {
-  color: #ef4444;
-}
-
-.btn-play {
-  background: rgba(56, 189, 248, 0.2);
-  color: #38bdf8;
-  border: 1px solid #38bdf8;
-  padding: 6px 16px;
-  border-radius: 6px;
-  font-weight: bold;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.table-card:hover .btn-play {
-  background: #38bdf8;
-  color: #0f172a;
+.divider {
+  height: 1px;
+  width: 90%;
+  margin: 10px auto;
+  background: linear-gradient(to right, transparent, rgba(255,255,255,0.1), transparent);
 }
 
 .loading-state, .error-message, .empty-state {
   text-align: center;
   margin-top: 50px;
   color: #94a3b8;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 15px;
+}
+
+.empty-state {
+  background: rgba(255,255,255,0.02);
+  border: 1px dashed rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 30px;
+  margin: 0 20px;
 }
 
 .error-message {
   color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+  padding: 15px;
+  border-radius: 8px;
+  border: 1px dashed #ef4444;
+  margin: 20px;
 }
 
-.empty-state .sub-text {
-  font-size: 12px;
-  color: #64748b;
-  margin-top: 8px;
-  display: block;
+.loader-spin { 
+  width: 40px; 
+  height: 40px; 
+  border: 4px solid rgba(56, 189, 248, 0.3); 
+  border-top-color: #38bdf8; 
+  border-radius: 50%; 
+  animation: spin 1s linear infinite; 
+}
+
+@keyframes spin { 
+  to { transform: rotate(360deg); } 
+}
+
+/* Responsividade Básica */
+@media (max-width: 768px) {
+  .header-area {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 15px;
+    padding: 20px;
+  }
+  .games-feed {
+    padding: 0 5px;
+  }
 }
 </style>

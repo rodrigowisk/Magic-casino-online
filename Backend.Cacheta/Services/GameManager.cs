@@ -15,11 +15,10 @@ namespace Backend.Cacheta.Services;
 
 public class GameManager
 {
+    private const int TurnDurationSeconds = 60;
+
     private readonly ConcurrentDictionary<string, TableState> _tables = new();
-
-    // Guarda o monte fechado de cada mesa
     private readonly ConcurrentDictionary<string, List<string>> _tableDecks = new();
-
     private readonly IServiceProvider _serviceProvider;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly Timer _serverTickTimer;
@@ -57,18 +56,43 @@ public class GameManager
                     var player = table.Players.FirstOrDefault(p => p.Seat == timeoutSeat);
                     if (player != null)
                     {
-                        // Se o jogador estourar o tempo na Cacheta, por enquanto ele é removido da mão (Fold)
-                        player.Status = "out";
+                        if (!player.HasDrawnThisTurn)
+                        {
+                            if (_tableDecks.TryGetValue(table.TableId, out var deck))
+                            {
+                                if (deck.Count == 0 && table.DiscardPile.Count > 0)
+                                {
+                                    var newDeck = new List<string>(table.DiscardPile);
+                                    table.DiscardPile.Clear();
 
-                        // Passa a vez para o próximo
+                                    var rnd = new Random();
+                                    deck = newDeck.OrderBy(x => rnd.Next()).ToList();
+                                    _tableDecks[table.TableId] = deck;
+                                }
+
+                                if (deck.Count > 0)
+                                {
+                                    string drawnCard = deck.First();
+                                    deck.RemoveAt(0);
+                                    player.Cards.Add(drawnCard);
+                                    table.StockPileCount = deck.Count;
+                                }
+                            }
+                        }
+
+                        if (player.Cards.Count > 0)
+                        {
+                            string cardToDiscard = player.Cards.Last();
+                            player.Cards.Remove(cardToDiscard);
+                            table.DiscardPile.Add(cardToDiscard);
+                        }
+
+                        player.HasDrawnThisTurn = false;
                         AdvanceTurn(table);
-
-                        // Renova o tempo para o próximo jogador
-                        table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+                        table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
                     }
                 }
 
-                // FAXINEIRO DE SESSÕES: Limpa histórico de quem saiu e desconectou há mais de 6 horas
                 table.Players.RemoveAll(p => !p.IsSeated && string.IsNullOrEmpty(p.ConnectionId) && p.LastActiveAt < DateTime.UtcNow.AddHours(-6));
             }
 
@@ -80,7 +104,6 @@ public class GameManager
         }
     }
 
-    // 👇 MÉTODO RESTAURADO PARA A CACHETA (O QUE CAUSOU O ERRO NO DOCKER) 👇
     public async Task ProcessNextRoundLoop(string tableId, bool roundEnded, int delayMs)
     {
         var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
@@ -102,7 +125,6 @@ public class GameManager
             {
                 foreach (var p in resolvingState.Players)
                 {
-                    p.Status = "waiting";
                     p.Cards.Clear();
                     p.HasDrawnThisTurn = false;
 
@@ -114,6 +136,7 @@ public class GameManager
                         p.IsSeated = false;
                         p.Seat = -1;
                         p.LeaveNextHand = false;
+                        p.Status = "waiting";
                         p.TotalCashOut += p.Chips;
                         p.LastChips = p.Chips;
                         p.Chips = 0;
@@ -131,39 +154,25 @@ public class GameManager
                             }));
                         }
                     }
+                    else if (p.IsSeated)
+                    {
+                        // Todos os sentados vão para WAITING e precisam confirmar o "Continuar"
+                        p.Status = "waiting";
+                    }
                 }
 
-                // Limpa a mesa da Cacheta para o próximo round
                 resolvingState.ViraCard = string.Empty;
                 resolvingState.DiscardPile.Clear();
                 resolvingState.StockPileCount = 0;
                 resolvingState.Phase = "waiting";
             }
 
-            if (cashoutTasks.Any())
-            {
-                await Task.WhenAll(cashoutTasks);
-            }
+            if (cashoutTasks.Any()) await Task.WhenAll(cashoutTasks);
 
-            if (CheckAndStartGame(tableId))
-            {
-                var dealingState = GetOrCreateTable(tableId);
-                await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", dealingState);
-
-                await Task.Delay(3000);
-
-                lock (dealingState.Players)
-                {
-                    dealingState.Phase = "betting";
-                    dealingState.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
-                }
-                await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", dealingState);
-            }
-            else
-            {
-                var finalWaitingState = GetOrCreateTable(tableId);
-                await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", finalWaitingState);
-            }
+            // Atualiza a mesa para waiting e pede ao frontend para mostrar o botão de Continuar
+            var finalWaitingState = GetOrCreateTable(tableId);
+            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", finalWaitingState);
+            await hubContext.Clients.Group(tableId).SendAsync("PromptNextRound");
         }
         else
         {
@@ -171,7 +180,7 @@ public class GameManager
             lock (nextTurnState.Players)
             {
                 nextTurnState.Phase = "betting";
-                nextTurnState.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+                nextTurnState.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
             }
             await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", nextTurnState);
         }
@@ -276,7 +285,7 @@ public class GameManager
                         if (table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
                         {
                             AdvanceTurn(table);
-                            table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+                            table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
                         }
                     }
 
@@ -339,9 +348,7 @@ public class GameManager
                 _ = Task.Run(async () => {
                     var refundResult = await _walletService.AddCashOutAsync(player.UserId, buyIn, tableId);
                     if (refundResult.Success)
-                    {
                         await hubContext.Clients.Group($"user_{player.UserId}").SendAsync("WalletBalanceUpdated", refundResult.NewBalance);
-                    }
                 });
                 return false;
             }
@@ -351,7 +358,7 @@ public class GameManager
             player.TotalBuyIn += buyIn;
             player.LastChips = 0;
             player.IsSeated = true;
-            player.Status = (table.Phase == "waiting") ? "waiting" : "out";
+            player.Status = "ready"; // Já senta com status READY para a próxima mão
             player.LeaveNextHand = false;
             player.LastActiveAt = DateTime.UtcNow;
             return true;
@@ -380,9 +387,25 @@ public class GameManager
             player.Chips += amount;
             player.TotalBuyIn += amount;
             player.LastActiveAt = DateTime.UtcNow;
-            if (table.Phase == "waiting") player.Status = "waiting";
+            player.Status = "ready"; // Ao comprar mais fichas, fica pronto.
             return true;
         }
+    }
+
+    public bool SetPlayerReady(string tableId, string connectionId)
+    {
+        var table = GetOrCreateTable(tableId);
+        lock (table.Players)
+        {
+            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+            if (player != null && player.IsSeated)
+            {
+                player.Status = "ready";
+                player.LastActiveAt = DateTime.UtcNow;
+                return true;
+            }
+        }
+        return false;
     }
 
     public async Task<bool> StandUp(string tableId, string connectionId)
@@ -451,20 +474,19 @@ public class GameManager
         {
             bool chargeAnte = table.Pot <= 0;
 
+            // Só começa se tiverem 2 ou mais jogadores no status READY
             var eligiblePlayers = table.Players.Where(p =>
-                p.IsSeated && p.Chips > 0 && (!chargeAnte || p.Chips >= table.MinBet)
+                p.IsSeated && p.Chips > 0 && p.Status == "ready" && (!chargeAnte || p.Chips >= table.MinBet)
             ).OrderBy(p => p.Seat).ToList();
 
             if (eligiblePlayers.Count >= 2 && table.Phase == "waiting")
             {
                 table.Phase = "dealing";
 
-                // LÓGICA DA CACHETA (2 Baralhos / 104 cartas)
                 var ranks = new[] { "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K" };
                 var suits = new[] { "♥", "♦", "♣", "♠" };
                 var deck = new List<string>();
 
-                // Cria 2 baralhos
                 for (int i = 0; i < 2; i++)
                 {
                     foreach (var r in ranks) foreach (var s in suits) deck.Add(r + s);
@@ -481,7 +503,6 @@ public class GameManager
                         table.Pot += table.MinBet;
                     }
 
-                    // Distribui 9 cartas na Cacheta
                     p.Cards = deck.Take(9).ToList();
                     deck.RemoveRange(0, 9);
 
@@ -490,12 +511,11 @@ public class GameManager
                     p.HasDrawnThisTurn = false;
                 }
 
-                // Vira uma carta que define o Curinga
                 table.ViraCard = deck[0];
                 deck.RemoveAt(0);
 
-                table.DiscardPile = new List<string>(); // Lixo começa vazio
-                _tableDecks[tableId] = deck; // Resto do monte
+                table.DiscardPile = new List<string>();
+                _tableDecks[tableId] = deck;
                 table.StockPileCount = deck.Count;
 
                 table.CurrentTurnSeat = eligiblePlayers[0].Seat;
@@ -542,10 +562,7 @@ public class GameManager
                         deck = newDeck.OrderBy(x => rnd.Next()).ToList();
                         _tableDecks[tableId] = deck;
                     }
-                    else
-                    {
-                        return false;
-                    }
+                    else return false;
                 }
 
                 string drawnCard = deck.First();
@@ -556,7 +573,7 @@ public class GameManager
 
             player.HasDrawnThisTurn = true;
             player.LastActiveAt = DateTime.UtcNow;
-            table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+            table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
 
             return true;
         }
@@ -589,11 +606,53 @@ public class GameManager
             player.HasDrawnThisTurn = false;
             player.LastActiveAt = DateTime.UtcNow;
 
-            // TODO: AQUI ENTRARÁ O ALGORITMO DE VERIFICAR SE BATEU
-            // Se ele bater, roundEnded = true;
-
             AdvanceTurn(table);
-            table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+            table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
+
+            return true;
+        }
+    }
+
+    public bool DeclareWin(string tableId, string connectionId, string? cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups)
+    {
+        seat = -1;
+        playerName = string.Empty;
+        winningGroups = new List<List<string>>();
+        var table = GetOrCreateTable(tableId);
+
+        lock (table.Players)
+        {
+            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+
+            if (player == null || table.CurrentTurnSeat < 0 || player.Seat != table.CurrentTurnSeat || player.Status != "playing")
+                return false;
+
+            var handToValidate = new List<string>(player.Cards);
+            if (!string.IsNullOrEmpty(cardToDiscard) && handToValidate.Contains(cardToDiscard))
+            {
+                handToValidate.Remove(cardToDiscard);
+            }
+
+            // O Motor C# de Backtracking que previne completamente o "bater furado"
+            if (!ValidateCachetaHand(handToValidate, table.ViraCard, out winningGroups))
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(cardToDiscard) && player.Cards.Contains(cardToDiscard))
+            {
+                player.Cards.Remove(cardToDiscard);
+                table.DiscardPile.Add(cardToDiscard);
+            }
+
+            seat = player.Seat;
+            playerName = player.Name;
+
+            player.HasDrawnThisTurn = false;
+            player.LastActiveAt = DateTime.UtcNow;
+
+            table.CurrentTurnSeat = -1;
+            table.TurnEndTime = null;
 
             return true;
         }
@@ -612,8 +671,149 @@ public class GameManager
                 return false;
             }
         }
-
         table.CurrentTurnSeat = -1;
         return true;
+    }
+
+    // =========================================================================
+    // 👇 MOTOR MATEMÁTICO BLINDADO DE CACHETA/RUMMY 👇
+    // =========================================================================
+
+    private int GetRankValue(string rankStr)
+    {
+        return rankStr switch
+        {
+            "A" => 1,
+            "2" => 2,
+            "3" => 3,
+            "4" => 4,
+            "5" => 5,
+            "6" => 6,
+            "7" => 7,
+            "8" => 8,
+            "9" => 9,
+            "10" => 10,
+            "J" => 11,
+            "Q" => 12,
+            "K" => 13,
+            _ => 0
+        };
+    }
+
+    private bool ValidateCachetaHand(List<string> hand, string viraCard, out List<List<string>> winningGroups)
+    {
+        winningGroups = new List<List<string>>();
+        if (hand.Count != 9 && hand.Count != 10) return false;
+
+        int viraRank = GetRankValue(viraCard.Substring(0, viraCard.Length - 1));
+        int wildcardRank = viraRank == 13 ? 1 : viraRank + 1;
+
+        var wildcards = hand.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) == wildcardRank).ToList();
+        var normals = hand.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) != wildcardRank).ToList();
+
+        return BacktrackCacheta(normals, wildcards.Count, new List<List<string>>(), out winningGroups, wildcards);
+    }
+
+    private bool BacktrackCacheta(List<string> normals, int wildcardsLeft, List<List<string>> currentGroups, out List<List<string>> finalGroups, List<string> actualWildcards)
+    {
+        finalGroups = currentGroups;
+        if (normals.Count == 0)
+        {
+            if (currentGroups.Count == 3)
+            {
+                finalGroups = new List<List<string>>(currentGroups);
+                int wIndex = actualWildcards.Count - wildcardsLeft;
+                for (int i = 0; i < wildcardsLeft; i++) finalGroups[0].Add(actualWildcards[wIndex + i]);
+                return true;
+            }
+            return false;
+        }
+
+        if (currentGroups.Count >= 3) return false;
+
+        var firstCard = normals[0];
+        string rankStr = firstCard.Substring(0, firstCard.Length - 1);
+        char suit = firstCard.Last();
+        int rankVal = GetRankValue(rankStr);
+
+        // 1. Trinca/Quadra (Mesmo número, Naipes OBRIGATORIAMENTE diferentes)
+        var sameRankCards = normals.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) == rankVal)
+                                   .GroupBy(c => c.Last()).Select(g => g.First()).Take(4).ToList();
+
+        for (int size = 3; size <= 4; size++)
+        {
+            for (int wUse = 0; wUse <= wildcardsLeft && wUse <= size - 1; wUse++)
+            {
+                int neededNormal = size - wUse;
+                if (sameRankCards.Count >= neededNormal && sameRankCards.Contains(firstCard))
+                {
+                    var group = sameRankCards.Take(neededNormal).ToList();
+                    if (!group.Contains(firstCard))
+                    {
+                        group.RemoveAt(group.Count - 1);
+                        group.Add(firstCard);
+                    }
+
+                    var remainingNormals = new List<string>(normals);
+                    foreach (var c in group) remainingNormals.Remove(c);
+
+                    var newGroups = new List<List<string>>(currentGroups);
+                    var fullGroup = new List<string>(group);
+                    for (int i = 0; i < wUse; i++) fullGroup.Add(actualWildcards[actualWildcards.Count - wildcardsLeft + i]);
+                    newGroups.Add(fullGroup);
+
+                    if (BacktrackCacheta(remainingNormals, wildcardsLeft - wUse, newGroups, out finalGroups, actualWildcards))
+                        return true;
+                }
+            }
+        }
+
+        // 2. Sequência (Mesmo Naipe, em ordem, sem repetir a mesma carta)
+        var sameSuitCards = normals.Where(c => c.Last() == suit)
+                                   .GroupBy(c => GetRankValue(c.Substring(0, c.Length - 1)))
+                                   .Select(g => g.First()).ToList();
+
+        for (int startOffset = 0; startOffset <= 3; startOffset++)
+        {
+            int startRank = rankVal - startOffset;
+            if (startRank < 1) continue;
+
+            for (int size = 3; size <= 4; size++)
+            {
+                if (startOffset >= size) continue;
+
+                for (int wUse = 0; wUse <= wildcardsLeft && wUse <= size - 1; wUse++)
+                {
+                    var group = new List<string>();
+                    int currentW = wUse;
+                    for (int i = 0; i < size; i++)
+                    {
+                        int targetRank = startRank + i;
+                        int searchRank = targetRank == 14 ? 1 : targetRank; // Permite sequência com Ás no final (Q K A)
+                        var card = sameSuitCards.FirstOrDefault(c => GetRankValue(c.Substring(0, c.Length - 1)) == searchRank);
+
+                        if (card != null) group.Add(card);
+                        else if (currentW > 0) currentW--;
+                        else break;
+                    }
+
+                    if (group.Count + (wUse - currentW) == size && group.Contains(firstCard))
+                    {
+                        var remainingNormals = new List<string>(normals);
+                        foreach (var c in group) remainingNormals.Remove(c);
+
+                        var newGroups = new List<List<string>>(currentGroups);
+                        var fullGroup = new List<string>(group);
+                        for (int i = 0; i < (wUse - currentW); i++) fullGroup.Add(actualWildcards[actualWildcards.Count - wildcardsLeft + i]);
+                        newGroups.Add(fullGroup);
+
+                        if (BacktrackCacheta(remainingNormals, wildcardsLeft - (wUse - currentW), newGroups, out finalGroups, actualWildcards))
+                            return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 }

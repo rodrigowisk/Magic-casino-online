@@ -40,6 +40,7 @@ export class MeinhoPixiEngine {
     public heroPixiCards: PIXI.Container[] = [];
     
     public isHeroCardsHidden: boolean = false;
+    public isDiscardingCards: boolean = false;
 
     public activeTimerSeat = -1;
     public turnEndTime = 0;
@@ -287,10 +288,19 @@ export class MeinhoPixiEngine {
         }
     }
 
-    private updateDeckVisibility() {
+    public updateDeckVisibility() {
         if (this.deckInstance && this.gameState && this.gameState.players) {
             const seatedCount = this.gameState.players.filter((p: any) => p.isSeated).length;
-            this.deckInstance.view.visible = seatedCount > 1;
+            
+            // Verifica se a mão ainda está rolando (dealing, betting, ou resolving)
+            const isGameActive = this.gameState.phase !== 'waiting';
+            
+            // 👇 SE ESTIVER DESCARTANDO **OU** O JOGO AINDA ESTIVER ATIVO, MANTÉM O BARALHO
+            if (this.isDiscardingCards || isGameActive) {
+                this.deckInstance.view.visible = true;
+            } else {
+                this.deckInstance.view.visible = seatedCount > 1;
+            }
         }
     }
 
@@ -440,6 +450,8 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
     public async startGameAutomatically() {
         this.callbacks.setDealing(true);
         this.callbacks.setAnimating(true); 
+
+        const lockedPeekMode = this.peekMode;
         
         try {
             this.resetAvatars();
@@ -502,7 +514,7 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
                 const rank = cardStr.slice(0, -1) || "A"; 
                 const suit = cardStr.slice(-1) || "♠";
                 
-                const isFaceUp = isTargetHero && !this.peekMode;
+                const isFaceUp = isTargetHero && !lockedPeekMode;
                 const card = this.deckInstance.createCardToDeal(isFaceUp, rank, suit);
                 
                 card.scale.set(finalScale);
@@ -631,7 +643,11 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         const currentPlayer = this.gameState.players[seatIndex];
         if (!currentPlayer) return;
 
-        this.stopTimer(); 
+        if (this.activeTimerSeat === seatIndex) {
+            this.stopTimer(); 
+        }
+
+
         currentPlayer.status = 'out';
         this.darkenAvatar(seatIndex); 
         
@@ -656,23 +672,37 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         const currentPlayer = this.gameState.players[seatIndex];
         if (!currentPlayer) return;
 
-        this.stopTimer(); 
+        if (this.activeTimerSeat === seatIndex) {
+            this.stopTimer(); 
+        }
 
         let revealedCards = playedCards || [];
         let centerCard = centerCardRevealed || "2♥";
 
-        const coords = this.seatCoords[seatIndex];
+const coords = this.seatCoords[seatIndex];
         const pX = coords?.x ?? 0;
         const pY = coords?.y ?? 0;
 
+        // 👇 SOLUÇÃO: Cálculo geométrico apontando sempre para o Pote
+        const targetPotX = this.POT_X - 35; // O centro visual da pilha do pote
+        const targetPotY = this.POT_Y;
+        
+        const dx = targetPotX - pX;
+        const dy = targetPotY - pY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        
+        // Distância que a ficha para na frente do avatar (ajuste se quiser mais perto/longe)
+        const betDistance = 75; 
+        
         let betX = pX;
         let betY = pY;
-
-        if (seatIndex === 0) { betX = pX; betY = pY - 85; } 
-        else if (seatIndex === 3) { betX = pX; betY = pY + 85; } 
-        else if (seatIndex === 1 || seatIndex === 2) { betX = pX + 65; betY = pY + 45; } 
-        else if (seatIndex === 4 || seatIndex === 5) { betX = pX - 65; betY = pY + 45; }
-
+        
+        if (dist > 0) {
+            betX = pX + (dx / dist) * betDistance;
+            betY = pY + (dy / dist) * betDistance;
+        }
+        // 👆 Fim do novo cálculo
+      
         const betChip = await this.throwCustomChip(pX, pY, betX, betY, betAmount, false);
         this.gameState.phase = 'resolving';
         
@@ -1113,6 +1143,9 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
     private async discardCards(cardsToDiscard: PIXI.Container[]) {
         if (!this.app || cardsToDiscard.length === 0) return;
 
+        this.isDiscardingCards = true;
+        this.updateDeckVisibility();
+
         const PORTAL_X = 265; 
         const PORTAL_Y = 420; 
 
@@ -1295,6 +1328,9 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
         
         if (blackHoleCore.parent) blackHoleCore.parent.removeChild(blackHoleCore);
         blackHoleCore.destroy();
+
+        this.isDiscardingCards = false;
+        this.updateDeckVisibility();
     }
 
     private async throwCustomChip(startX: number, startY: number, endX: number, endY: number, amount?: number, isPot: boolean = false) {
@@ -1338,6 +1374,18 @@ public updatePlayerSeat(seatIndex: number, isSeated: boolean, name: string, chip
 
         await this.performAnimation(chipContainer, endX, endY, 15); 
         return chipContainer;
+    }
+
+    public playSitEffect(visualSeatIndex: number) {
+        if (this.playerSeats && this.playerSeats[visualSeatIndex]) {
+            this.playerSeats[visualSeatIndex].playSitAnimation();
+        }
+    }
+
+    public playStandEffect(visualSeatIndex: number) {
+        if (this.playerSeats && this.playerSeats[visualSeatIndex]) {
+            this.playerSeats[visualSeatIndex].playStandAnimation();
+        }
     }
 
     private darkenAvatar(seatIndex: number) {

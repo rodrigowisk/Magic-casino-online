@@ -50,4 +50,8 @@ public class User
 
     [Column("isactive")]
     public bool IsActive { get; set; }
+
+    // 👇 NOVA COLUNA DO SISTEMA DE AFILIADOS 👇
+    [Column("referred_by")]
+    public Guid? ReferredBy { get; set; }
 }
