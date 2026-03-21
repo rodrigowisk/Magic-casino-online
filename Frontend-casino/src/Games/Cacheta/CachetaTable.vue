@@ -349,7 +349,7 @@ const engine = new CachetaPixiEngine(gameState, {
         cachetaHub.reorderHand(newOrder);
     },
 
-    sitDown: async (visualSeatIndex: number) => {
+sitDown: async (visualSeatIndex: number) => {
         if (gameState.players.some(p => p.isHero && p.isSeated)) return;
         
         const logicalSeat = (visualSeatIndex + myLogicalSeatOffset.value) % (gameState.maxPlayers || 6);
@@ -370,6 +370,15 @@ const engine = new CachetaPixiEngine(gameState, {
 
         pendingSitSeat.value = logicalSeat;
         showBuyInModal.value = true;
+    }, // 👇 NÃO ESQUEÇA ESTA VÍRGULA AQUI! 👇
+
+    // 👇 AS DUAS FUNÇÕES NOVAS QUE LIGAM A TELA AO SERVIDOR 👇
+    onDrawCard: (fromDiscard: boolean) => {
+        cachetaHub.drawCard(fromDiscard);
+    },
+    onDiscardCard: (cardStr: string) => {
+        cachetaHub.discardCard(cardStr);
+        selectedCardToDiscard.value = null; // Limpa a UI após descartar
     }
 });
 
