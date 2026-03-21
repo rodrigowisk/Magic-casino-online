@@ -3,7 +3,7 @@ import { MeinhoPixiEngine } from './MeinhoPixiEngine';
 
 export class MeinhoAnimator {
     
-    public static async discardCards(engine: MeinhoPixiEngine, cardsToDiscard: PIXI.Container[]) {
+public static async discardCards(engine: MeinhoPixiEngine, cardsToDiscard: PIXI.Container[]) {
         if (!engine.app || cardsToDiscard.length === 0) return;
 
         engine.isDiscardingCards = true;
@@ -84,8 +84,12 @@ export class MeinhoAnimator {
                     const speed = 0.012 + (Math.random() * 0.008); 
 
                     const suckAnim = () => {
-                        if (!card || card.destroyed || !engine.app || !engine.app.ticker) {
+                        // 👇 CORREÇÃO: Pula animação se aba estiver oculta 👇
+                        if (!card || card.destroyed || !engine.app || !engine.app.ticker || document.hidden) {
                             if (engine.app && engine.app.ticker) engine.app.ticker.remove(suckAnim);
+                            const idx = engine.dealtCardsUI.indexOf(card);
+                            if (idx > -1) engine.dealtCardsUI.splice(idx, 1);
+                            engine.safeDestroy(card);
                             resolve(); return;
                         }
 
@@ -123,7 +127,24 @@ export class MeinhoAnimator {
         
         await new Promise<void>((resolve) => {
             const collapseAnim = () => {
-                if (!engine.app || !engine.app.ticker) return resolve();
+                // 👇 CORREÇÃO: Resolve imediatamente se aba estiver oculta 👇
+                if (!engine.app || !engine.app.ticker || document.hidden) {
+                    coreScale = 0;
+                    if (engine.app && engine.app.ticker) engine.app.ticker.remove(collapseAnim);
+                    
+                    for(let i = 0; i < 40; i++) {
+                        const p = new PIXI.Graphics();
+                        p.circle(0, 0, Math.random() * 3 + 1.5);
+                        p.fill({ color: engine.MAGIC_COLORS[Math.floor(Math.random() * engine.MAGIC_COLORS.length)], alpha: 1 });
+                        p.x = PORTAL_X;
+                        p.y = PORTAL_Y;
+                        engine.mainLayer.addChild(p);
+                        engine.activeFireParticles.push({ mesh: p, life: 1.0, vx: (Math.random() - 0.5) * 16, vy: (Math.random() - 0.5) * 16 });
+                    }
+                    resolve();
+                    return;
+                }
+
                 coreScale -= 0.06; 
                 if (coreScale <= 0) {
                     coreScale = 0;
@@ -140,8 +161,10 @@ export class MeinhoAnimator {
                     }
                     resolve();
                 }
+                
                 if (blackHoleCore && !blackHoleCore.destroyed) blackHoleCore.scale.set(coreScale);
             };
+            
             if (engine.app && engine.app.ticker) engine.app.ticker.add(collapseAnim);
             else resolve();
         });
@@ -155,6 +178,7 @@ export class MeinhoAnimator {
         engine.updateDeckVisibility();
     }
 
+    
     public static async throwCustomChip(engine: MeinhoPixiEngine, startX: number, startY: number, endX: number, endY: number, amount?: number, isPot: boolean = false) {
         if (!engine.app) return null;
         const chipContainer = new PIXI.Container();

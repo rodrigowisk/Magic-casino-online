@@ -1,25 +1,39 @@
 <template>
   <div class="rebuy-modal-overlay">
     <div class="rebuy-modal">
-      <h2>Suas fichas acabaram!</h2>
-      <p>Você deseja continuar no jogo?</p>
-      <p class="balance-info">Conta Geral: R$ {{ maxBalance }}</p>
       
-      <div class="slider-container">
-        <label>Comprar: R$ {{ localRebuyAmount }}</label>
-        <input 
-          type="range" 
-          :min="minBuyIn" 
-          :max="maxBalance" 
-          v-model.number="localRebuyAmount" 
-          class="styled-slider" 
-        />
-      </div>
+      <template v-if="maxBalance < minBuyIn">
+        <h2>Saldo Insuficiente</h2>
+        <p>Você precisa de pelo menos R$ {{ minBuyIn }} para continuar nesta mesa.</p>
+        <p class="balance-info">Conta Geral: R$ {{ maxBalance }}</p>
+        
+        <div class="modal-actions-single">
+          <button class="btn-cancel full-width" @click="$emit('cancel')">Levantar da Mesa</button>
+        </div>
+      </template>
 
-      <div class="modal-actions">
-        <button class="btn-cancel" @click="$emit('cancel')">Não (Levantar)</button>
-        <button class="btn-confirm" @click="$emit('confirm', localRebuyAmount)">Sim (Comprar)</button>
-      </div>
+      <template v-else>
+        <h2>Suas fichas acabaram!</h2>
+        <p>Você deseja continuar no jogo?</p>
+        <p class="balance-info">Conta Geral: R$ {{ maxBalance }}</p>
+        
+        <div class="slider-container">
+          <label>Comprar: R$ {{ localRebuyAmount }}</label>
+          <input 
+            type="range" 
+            :min="minBuyIn" 
+            :max="maxBalance" 
+            v-model.number="localRebuyAmount" 
+            class="styled-slider" 
+          />
+        </div>
+
+        <div class="modal-actions">
+          <button class="btn-cancel" @click="$emit('cancel')">Não (Levantar)</button>
+          <button class="btn-confirm" @click="$emit('confirm', localRebuyAmount)">Sim (Comprar)</button>
+        </div>
+      </template>
+
     </div>
   </div>
 </template>
@@ -121,6 +135,16 @@ onMounted(() => {
   display: flex; 
   justify-content: space-between; 
   margin-top: 25px; 
+}
+
+.modal-actions-single {
+  display: flex;
+  justify-content: center;
+  margin-top: 25px;
+}
+
+.full-width {
+  width: 100% !important;
 }
 
 .btn-cancel, .btn-confirm { 

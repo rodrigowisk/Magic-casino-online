@@ -138,8 +138,9 @@ export class PlayerSeat {
         this.seatedContainer.addChild(this.nameText);
 
         const safeChips = initialChips || 0;
+        // 👇 Formatação aplicada aqui na construção do saldo inicial
         this.balanceText = new PIXI.Text({ 
-            text: `R$ ${safeChips}`, 
+            text: `${Number(safeChips).toFixed(2).replace('.', ',')}`, 
             style: { fontFamily: 'Arial', fontSize: 13, fill: 0xffffff, fontWeight: 'bold' } 
         });
         this.balanceText.anchor.set(0.5); 
@@ -458,7 +459,8 @@ export class PlayerSeat {
     public updatePlayerInfo(name: string, chips: number) {
         const safeName = name || 'Livre';
         this.nameText.text = safeName.length > 10 ? safeName.substring(0, 9) + '...' : safeName;
-        this.balanceText.text = `R$ ${chips || 0}`;
+        // 👇 Formatação aplicada aqui em cada atualização do saldo ao longo do jogo
+        this.balanceText.text = `${Number(chips || 0).toFixed(2).replace('.', ',')}`;
     }
 
     public startTimer() {

@@ -11,9 +11,11 @@
         <p>Tempo Restante: <strong class="timer-text">{{ timeLeftDisplay }}</strong></p>
       </div>
 
-      <p class="balance-info">Seu Saldo: R$ {{ maxBalance }}</p>
+      <p class="balance-info" :class="{ 'text-error': maxBalance < minBuyIn }">
+        Seu Saldo: R$ {{ maxBalance }}
+      </p>
       
-      <div class="slider-container">
+      <div class="slider-container" v-if="maxBalance >= minBuyIn">
         <label>Buy-in Mínimo: R$ {{ localBuyInAmount }}</label>
         <input 
           type="range" 
@@ -23,10 +25,20 @@
           class="styled-slider" 
         />
       </div>
+      
+      <div class="slider-container" v-else>
+        <p class="error-msg">Você não possui saldo suficiente para o Cacife Mínimo.</p>
+      </div>
 
       <div class="modal-actions">
         <button class="btn-cancel" @click="$emit('cancel')">Cancelar</button>
-        <button class="btn-confirm" @click="$emit('confirm', localBuyInAmount)">Sentar</button>
+        <button 
+          class="btn-confirm" 
+          :disabled="maxBalance < minBuyIn"
+          @click="$emit('confirm', localBuyInAmount)"
+        >
+          Sentar
+        </button>
       </div>
     </div>
   </div>
@@ -167,10 +179,9 @@ onUnmounted(() => {
   text-shadow: 0 0 5px rgba(241, 196, 15, 0.4);
 }
 
-/* 👇 Destaque para o Cronómetro Vermelho 👇 */
 .timer-text {
   color: #ff4757;
-  font-family: 'Courier New', Courier, monospace; /* Fonte tipo relógio digital */
+  font-family: 'Courier New', Courier, monospace; 
   font-size: 15px;
   font-weight: 900;
   text-shadow: 0 0 8px rgba(255, 71, 87, 0.5);
@@ -182,6 +193,18 @@ onUnmounted(() => {
   font-weight: bold; 
   font-size: 16px !important;
   margin-bottom: 20px !important;
+  transition: color 0.3s;
+}
+
+/* 👇 Classes dinâmicas para caso de erro de saldo 👇 */
+.text-error {
+  color: #ff4757 !important;
+}
+.error-msg {
+  color: #ff4757;
+  font-size: 15px;
+  font-weight: bold;
+  margin-top: 10px;
 }
 
 .slider-container { 
@@ -220,7 +243,7 @@ onUnmounted(() => {
   transition: transform 0.1s ease;
 }
 
-.btn-cancel:active, .btn-confirm:active {
+.btn-cancel:active:not(:disabled), .btn-confirm:active:not(:disabled) {
   transform: scale(0.95);
 }
 
@@ -232,5 +255,13 @@ onUnmounted(() => {
 .btn-confirm { 
   background: #3ce48a; 
   color: #000; 
+}
+
+/* 👇 Estilo para o botão Sentar quando estiver desativado 👇 */
+.btn-confirm:disabled {
+  background: #444;
+  color: #888;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 </style>

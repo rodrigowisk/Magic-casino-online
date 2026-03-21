@@ -11,17 +11,12 @@ export class PlayerSeat {
     private nameText: PIXI.Text;
     private balanceText: PIXI.Text;
 
-    // Propriedade da classe para controle do Avatar
     private avatarSprite: PIXI.Sprite;
-
-    // Elementos visuais do assento vazio
     private sentarText: PIXI.Text;
     private plusText: PIXI.Text; 
     private seatBase3D: PIXI.Graphics;
     private outerGlow: PIXI.Graphics;
     private isStaticEmpty: boolean = false;
-
-    // Referência para animação local do portal vazio
     private idleAnim: (() => void) | null = null;
     
     constructor(
@@ -37,53 +32,30 @@ export class PlayerSeat {
         this.container.x = x;
         this.container.y = y;
 
-        // ==============================================================
-        // ESTADO: ASSENTO VAZIO
-        // ==============================================================
         this.emptySeatContainer = new PIXI.Container();
         this.emptySeatContainer.eventMode = 'static'; 
         this.emptySeatContainer.cursor = 'pointer';   
         
         if (typeof onSitDown === 'function') {
-            this.emptySeatContainer.on('pointerdown', onSitDown); 
-            this.emptySeatContainer.on('pointertap', onSitDown);
-        } else {
-            console.warn("Aviso: Função onSitDown não foi passada corretamente para o assento.");
+            this.emptySeatContainer.removeAllListeners();
+            this.emptySeatContainer.on('pointerdown', (e) => {
+                e.stopPropagation();
+                onSitDown();
+            }); 
         }
 
-        // 1. Efeito de Brilho Externo (Glow Neon Azul)
         this.outerGlow = new PIXI.Graphics();
         this.outerGlow.circle(0, 0, 36);
         this.outerGlow.fill({ color: 0x00f3ff, alpha: 0.15 }); 
         this.outerGlow.blendMode = 'add';
         this.emptySeatContainer.addChild(this.outerGlow);
 
-        // 2. Base do Assento
         this.seatBase3D = new PIXI.Graphics();
         this.drawActiveSeatBase(); 
         this.emptySeatContainer.addChild(this.seatBase3D);
 
-        const plusStyle = { 
-            fontFamily: 'Arial', 
-            fontSize: 24, 
-            fill: 0xffffff, 
-            fontWeight: '900', 
-            dropShadow: false, 
-            align: 'center'
-        };
-
-        const textStyle = { 
-            fontFamily: 'Arial', 
-            fontSize: 8.5, 
-            fill: 0xffffff, 
-            fontWeight: '900', 
-            letterSpacing: 1.5, 
-            dropShadow: true, 
-            dropShadowColor: '#00f3ff', 
-            dropShadowDistance: 0,
-            dropShadowBlur: 8,
-            align: 'center'
-        };
+        const plusStyle = { fontFamily: 'Arial', fontSize: 24, fill: 0xffffff, fontWeight: '900', align: 'center' };
+        const textStyle = { fontFamily: 'Arial', fontSize: 8.5, fill: 0xffffff, fontWeight: '900', letterSpacing: 1.5, dropShadow: true, dropShadowColor: '#00f3ff', dropShadowDistance: 0, dropShadowBlur: 8, align: 'center' };
 
         // @ts-ignore
         this.plusText = new PIXI.Text({ text: '+', style: plusStyle });
@@ -97,37 +69,29 @@ export class PlayerSeat {
         this.sentarText.y = 8; 
         this.emptySeatContainer.addChild(this.sentarText);
 
-        // 👇 TRAVA DEFINITIVA COM TRY...CATCH 👇
         this.idleAnim = () => {
             try {
                 if (!this.container || this.container.destroyed || !this.seatBase3D || this.seatBase3D.destroyed) {
                     if (this.idleAnim) PIXI.Ticker.shared.remove(this.idleAnim);
                     return;
                 }
-
                 if (!this.emptySeatContainer || !this.emptySeatContainer.visible) return;
 
                 const time = Date.now();
                 const slowTime = time / 800; 
                 const seatScale = 1 + Math.sin(slowTime) * 0.015;
                 
-                // Valida antes do set() e aplica
                 if (this.seatBase3D.scale) this.seatBase3D.scale.set(seatScale);
                 if (this.outerGlow.scale) this.outerGlow.scale.set(seatScale + Math.sin(slowTime * 1.2) * 0.05);
                 this.outerGlow.alpha = 0.1 + Math.sin(slowTime * 1.5) * 0.1;
                 
                 if (this.sentarText) this.sentarText.alpha = 0.85 + Math.sin(slowTime * 2) * 0.15;
                 if (this.plusText) this.plusText.alpha = 0.85 + Math.sin(slowTime * 2) * 0.15;
-                
             } catch (e) {
-                // Se der qualquer erro no meio da animação (porque foi destruído), engole o erro e remove do loop de vez
                 if (this.idleAnim) PIXI.Ticker.shared.remove(this.idleAnim);
             }
         };
 
-        // ==============================================================
-        // ESTADO: JOGADOR SENTADO
-        // ==============================================================
         this.seatedContainer = new PIXI.Container();
 
         const bgCircle = new PIXI.Graphics();
@@ -182,9 +146,6 @@ export class PlayerSeat {
         this.container.addChild(this.emptySeatContainer);
         this.container.addChild(this.seatedContainer);
 
-        // ==============================================================
-        // ELEMENTOS COMUNS E TIMER 
-        // ==============================================================
         this.timerBgArc = new PIXI.Graphics();
         this.timerBgArc.circle(0,0, 34); 
         this.timerBgArc.stroke({width: 7, color: 0x333333, alpha: 0.6}); 
@@ -256,7 +217,6 @@ export class PlayerSeat {
         this.emptySeatContainer.visible = !isSeated;
         this.seatedContainer.visible = isSeated;
         if (this.idleAnim) {
-            // Remove primeiro para não duplicar listeners no Ticker
             PIXI.Ticker.shared.remove(this.idleAnim);
             if (!isSeated) {
                 PIXI.Ticker.shared.add(this.idleAnim);

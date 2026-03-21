@@ -71,8 +71,9 @@ export class MeinhoBoardUI {
         this.potStackSprite.visible = this.gameState.pot > 0;
         this.mainLayer.addChild(this.potStackSprite);
 
+        // 👇 Formatação aplicada aqui na montagem inicial!
         this.potTextUI = new PIXI.Text({
-            text: `Pote\n${this.gameState.pot}`,
+            text: `Pote\n${Number(this.gameState.pot).toFixed(2).replace('.', ',')}`,
             style: {
                 fontFamily: 'Arial', 
                 fontSize: 16, 
@@ -98,7 +99,8 @@ export class MeinhoBoardUI {
             this.tableInfoTextUI.text = `JOGO: MEINHO\nMESA: ${(tableName || 'CARREGANDO...').toUpperCase()}\nBUY-IN: R$ ${minBuyIn}\nANTE: R$ ${minBet}`;
         }
         if (this.potTextUI) {
-            this.potTextUI.text = `Pote\n${pot}`; 
+            // 👇 Formatação aplicada aqui em cada frame que o PixiJs desenha!
+            this.potTextUI.text = `Pote\n${Number(pot).toFixed(2).replace('.', ',')}`; 
             this.potTextUI.visible = pot > 0;
         }
     }

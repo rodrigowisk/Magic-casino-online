@@ -13,6 +13,7 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSignalR(); // O MOTOR EM TEMPO REAL ESTÁ LIGADO AQUI!
+builder.Services.AddHostedService<BotManagerService>();
 
 // 2. Adicionar o Gerenciador de Mesas (Singleton: mantém as mesas ativas na memória do servidor)
 builder.Services.AddSingleton<GameManager>();

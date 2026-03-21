@@ -27,8 +27,9 @@
 
       <button 
         class="action-btn bater-btn" 
+        :disabled="hasFurou"
         @click="$emit('declareWin', selectedCard)"
-        title="Bater na mesa (Vitória)"
+        :title="hasFurou ? 'Você furou e não pode bater nesta rodada!' : 'Bater na mesa (Vitória)'"
       >
         <span class="btn-text">🏆 BATER</span>
       </button>
@@ -130,6 +131,13 @@ defineEmits(['draw', 'discard', 'declareWin']);
   border: 1px solid #ff0055;
   width: 120px;
   animation: pulseBater 1.5s infinite;
+}
+
+.bater-btn:disabled {
+  background: linear-gradient(to bottom, #475569, #1e293b);
+  border: 1px solid #0f172a;
+  color: #94a3b8;
+  animation: none;
 }
 
 .bater-btn .btn-text {

@@ -128,6 +128,13 @@ public class GameHub : Hub
         return Task.CompletedTask;
     }
 
+    // 👇 CHAMA A FUNÇÃO DE REORGANIZAR A MÃO NO BACKEND 👇
+    public Task ReorderHand(string tableId, List<string> newOrder)
+    {
+        _gameManager.ReorderHand(tableId, Context.ConnectionId, newOrder);
+        return Task.CompletedTask;
+    }
+
     public async Task DrawCard(string tableId, bool fromDiscard)
     {
         if (_gameManager.DrawCard(tableId, Context.ConnectionId, fromDiscard, out int seat))
@@ -150,7 +157,6 @@ public class GameHub : Hub
         else await Clients.Caller.SendAsync("ReceiveError", "Movimento inválido. Você deve comprar antes de descartar.");
     }
 
-    // 👇 DECLARE WIN AGORA TRATA VITÓRIA OU FURO 👇
     public async Task DeclareWin(string tableId, string cardToDiscard)
     {
         string result = _gameManager.DeclareWin(tableId, Context.ConnectionId, cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups, out List<string> handCards);

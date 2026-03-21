@@ -56,7 +56,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { authService } from '../services/authService';
 
@@ -68,6 +68,35 @@ const password = ref('');
 const showPassword = ref(false);
 const isLoading = ref(false);
 const errorMessage = ref('');
+
+// Variável para controlar o áudio de fundo
+let cosmosAudio: HTMLAudioElement | null = null;
+
+onMounted(() => {
+  // Inicializa o áudio buscando da pasta public
+  cosmosAudio = new Audio('/sons/cosmos.mp3');
+  cosmosAudio.loop = true; // Loop infinito
+  cosmosAudio.volume = 0.05; // Volume agradável para não assustar o jogador
+
+  // Tenta tocar automaticamente
+  cosmosAudio.play().catch(() => {
+    // Se o navegador bloquear o autoplay, aguarda o primeiro clique na tela
+    const playOnInteraction = () => {
+      cosmosAudio?.play();
+      document.removeEventListener('click', playOnInteraction);
+    };
+    document.addEventListener('click', playOnInteraction);
+  });
+});
+
+onUnmounted(() => {
+  // Desliga a música e limpa a memória quando sair da tela de Login
+  if (cosmosAudio) {
+    cosmosAudio.pause();
+    cosmosAudio.currentTime = 0;
+    cosmosAudio = null;
+  }
+});
 
 const fazerLogin = async () => {
   errorMessage.value = '';
@@ -89,27 +118,32 @@ const irParaCadastro = () => router.push('/cadastro');
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;900&display=swap');
 
 .screen-wrapper {
+  /* 👇 SOLUÇÃO DEFINITIVA: Trava o componente na tela como se fosse um App nativo */
+  position: fixed;
+  top: 0;
+  left: 0;
   width: 100vw;
-  min-height: 100vh;
+  height: 100dvh; /* Continua usando dvh para a altura dinâmica */
+  
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 15px; /* Reduzido o padding externo */
+  padding: 15px; 
   box-sizing: border-box;
   background-color: #000;
   background-image: radial-gradient(circle at 50% 50%, #151e32 0%, #0a0f18 100%);
   font-family: 'Montserrat', sans-serif;
+  overflow: hidden;
 }
 
 .auth-box {
   width: 100%;
-  max-width: 350px; /* Deixei a caixa ligeiramente mais estreita para ficar mais elegante */
+  max-width: 350px; 
   max-height: 90vh; 
   overflow-y: auto;
   background: linear-gradient(to bottom, #000000 0%, rgba(10, 15, 24, 0.9) 100%);
   border: 2px solid #a855f7;
   border-radius: 20px;
-  /* Reduzi bastante o padding superior e inferior para encolher a altura da caixa */
   padding: 15px 20px; 
   box-shadow: 0 10px 40px rgba(0,0,0,0.8), 0 0 25px rgba(168, 85, 247, 0.6), inset 0 0 15px rgba(168, 85, 247, 0.4);
   box-sizing: border-box;
@@ -126,46 +160,39 @@ const irParaCadastro = () => router.push('/cadastro');
 
 .top-title {
   color: #ffffff;
-  font-size: 15px; /* Fonte levemente menor para combinar com o layout slim */
+  font-size: 15px; 
   font-weight: 900;
   letter-spacing: 3px;
   margin-bottom: 0px; 
-  margin-top: 5px; /* Um pequeno respiro no topo */
+  margin-top: 5px; 
   text-transform: uppercase;
 }
 
-/* --- ESTILOS NOVOS PARA O MAGIC LOGO --- */
 .magic-logo-wrapper {
   transform: scale(0.85); 
-  
-  /* Ajuste Fino de Centralização:
-     Aumentamos a margem de cima para puxar o mago mais para o título,
-     e diminuímos a de baixo na mesma proporção para o form não sair do lugar. */
   margin-top: -115px;  
   margin-bottom: -85px;
-  
   display: flex;
   justify-content: center;
   align-items: center;
   pointer-events: none; 
 }
-/* --------------------------------------- */
 
 .auth-form {
   display: flex;
   flex-direction: column;
-  gap: 10px; /* Reduzi o espaço entre os campos do formulário */
+  gap: 10px; 
 }
 
 .input-group {
   display: flex;
   flex-direction: column;
-  gap: 4px; /* Reduzi o espaço entre a label e o input */
+  gap: 4px; 
 }
 
 .input-group label {
   color: #aaa;
-  font-size: 10px; /* Label mais sutil */
+  font-size: 10px; 
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -175,7 +202,7 @@ const irParaCadastro = () => router.push('/cadastro');
   background: #111;
   border: 1px solid #444;
   color: #fff;
-  padding: 10px 12px; /* Input levemente mais baixo */
+  padding: 10px 12px; 
   border-radius: 8px;
   font-size: 13px; 
   outline: none;
@@ -203,7 +230,6 @@ const irParaCadastro = () => router.push('/cadastro');
   font-size: 16px;
 }
 
-/* Reduzi a altura da área de mensagens de erro para não roubar espaço vazio */
 .messages-area { text-align: center; min-height: 10px; margin-top: -2px; }
 .error-msg { color: #ff4757; font-size: 11px; font-weight: bold; margin: 0; }
 .success-msg { color: #2ecc71; font-size: 11px; font-weight: bold; margin: 0; }
@@ -212,7 +238,7 @@ const irParaCadastro = () => router.push('/cadastro');
   background: linear-gradient(to bottom, #a855f7, #7e22ce);
   border: 1px solid #6b21a8;
   color: white;
-  height: 44px; /* Botão mais slim */
+  height: 44px; 
   border-radius: 8px;
   font-family: 'Montserrat', sans-serif;
   font-weight: 900;
@@ -221,16 +247,27 @@ const irParaCadastro = () => router.push('/cadastro');
   cursor: pointer;
   box-shadow: inset 0px 2px 2px rgba(255,255,255,0.25), 0px 4px 6px rgba(0,0,0,0.5);
   transition: all 0.1s ease;
-  margin-top: 0px; /* Removi a margem extra do botão */
+  margin-top: 0px; 
 }
 
 .btn-primary:active { transform: translateY(3px) scale(0.98); }
 
 .auth-footer { 
   text-align: center; 
-  margin-top: 10px; /* Rodapé mais colado no botão */
+  margin-top: 10px; 
   color: #888; 
   font-size: 12px; 
 } 
 .auth-footer a { color: #a855f7; text-decoration: none; font-weight: 700; }
+</style>
+
+<style>
+html, body {
+  background-color: #000 !important;
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden !important; 
+  overscroll-behavior-y: none; /* Desativa o "bounce/pulo" no mobile */
+}
 </style>

@@ -15,6 +15,9 @@ import LobbyMeinho from '../views/Meinho/LobbyMeinho.vue';
 import CreateTable from '../components/Meinho/FormTable.vue';
 import MeinhoTable from '../Games/MeinhoTable.vue';
 
+// 👇 IMPORT DA NOSSA NOVA MESA DEV 👇
+import MeinhoTableDev from '../Games/MeinhoTableDev.vue';
+
 // --- TELAS DA CACHETA ---
 // Mantendo a correção para apontar para a pasta 'components'
 import CreateTableCacheta from '../components/Cacheta/FormTable.vue';
@@ -43,6 +46,9 @@ const routes = [
   // Rotas de Jogo (Meinho)
   { path: '/mesa/:id', name: 'Mesa', component: MeinhoTable },
   { path: '/criar-mesa', name: 'CreateTable', component: CreateTable },
+
+  // 👇 NOVA ROTA DEV COM PARÂMETRO OPCIONAL (O "?" É A MÁGICA) 👇
+  { path: '/meinhoDEV/:id?', name: 'MeinhoDev', component: MeinhoTableDev },
 
   // Rotas de Jogo (Cacheta)
   { path: '/mesa-cacheta/:id', name: 'MesaCacheta', component: CachetaTable },

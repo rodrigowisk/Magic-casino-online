@@ -24,9 +24,8 @@ public class GameManager
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly Timer _serverTickTimer;
     private readonly IRabbitMqService _rabbitMqService;
-
-    // NOVIDADE: Serviço de Carteira Injetado
     private readonly IWalletService _walletService;
+
 
     public GameManager(
         IServiceProvider serviceProvider,
@@ -40,6 +39,9 @@ public class GameManager
         _walletService = walletService;
         _serverTickTimer = new Timer(CheckTimeouts, null, 1000, 1000);
     }
+
+    //bot
+    public IEnumerable<TableState> GetAllTables() => _tables.Values;
 
     private void CheckTimeouts(object? state)
     {
@@ -60,16 +62,66 @@ public class GameManager
                     var player = table.Players.FirstOrDefault(p => p.Seat == timeoutSeat);
                     if (player != null)
                     {
-                        player.Status = "out";
-                        table.Phase = "resolving";
+                        // 1. Incrementa a ausência, pois o tempo estourou
+                        player.MissedTurns++;
 
-                        PublishHandToRabbitMq(table, timeoutSeat, 0, 0, 0, false, 0);
+                        // 2. Se estourar 3 vezes, expulsa o jogador da cadeira
+                        if (player.MissedTurns >= 3)
+                        {
+                            decimal chipsToReturn = player.Chips;
+                            string uId = player.UserId;
+                            int oldSeat = player.Seat;
 
-                        roundEnded = AdvanceTurn(table);
+                            player.Status = "out";
+                            player.IsSeated = false;
+                            player.Seat = -1;
+                            player.LeaveNextHand = false;
+                            player.TotalCashOut += player.Chips;
+                            player.LastChips = player.Chips;
+                            player.Chips = 0;
+                            player.LastActiveAt = DateTime.UtcNow;
+                            player.MissedTurns = 0; // Zera para quando ele voltar
+
+                            table.Phase = "resolving";
+                            PublishHandToRabbitMq(table, timeoutSeat, 0, 0, 0, false, 0);
+                            roundEnded = AdvanceTurn(table);
+
+                            // Avisa o front-end para fazer a animação do personagem levantando
+                            if (oldSeat != -1)
+                            {
+                                var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+                                _ = hubCtx.Clients.Group(table.TableId).SendAsync("PlayerStoodUp", oldSeat);
+                                _ = hubCtx.Clients.Group(table.TableId).SendAsync("TableStateUpdated", table);
+                            }
+
+                            // Devolve as fichas de forma assíncrona para não travar a mesa
+                            if (chipsToReturn > 0 && !string.IsNullOrEmpty(uId))
+                            {
+                                string tId = table.TableId;
+                                _ = Task.Run(async () =>
+                                {
+                                    var result = await _walletService.AddCashOutAsync(uId, chipsToReturn, tId);
+                                    if (result.Success)
+                                    {
+                                        var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+                                        await hubCtx.Clients.Group($"user_{uId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
+                                    }
+                                });
+                            }
+                        }
+                        else
+                        {
+                            // 3. Se ainda tem limite, apenas força ele a "Pular" a mão
+                            player.Status = "out";
+                            table.Phase = "resolving";
+
+                            PublishHandToRabbitMq(table, timeoutSeat, 0, 0, 0, false, 0);
+                            roundEnded = AdvanceTurn(table);
+                        }
                     }
                 }
 
-                // 👇 FAXINEIRO DE SESSÕES: Limpa histórico de quem saiu e desconectou há mais de 6 horas
+                // FAXINEIRO DE SESSÕES: Limpa histórico de quem saiu e desconectou há mais de 6 horas
                 table.Players.RemoveAll(p => !p.IsSeated && string.IsNullOrEmpty(p.ConnectionId) && p.LastActiveAt < DateTime.UtcNow.AddHours(-6));
             }
 
@@ -125,14 +177,13 @@ public class GameManager
                         p.LastChips = p.Chips;
                         p.Chips = 0;
                         p.LastActiveAt = DateTime.UtcNow;
+                        p.MissedTurns = 0; // Zera o contador
 
                         if (oldSeat != -1)
                         {
                             _ = hubContext.Clients.Group(tableId).SendAsync("PlayerStoodUp", oldSeat);
                         }
 
-
-                        // Se o jogador tinha dinheiro, agenda a devolução na carteira e avisa o SignalR
                         if (refund > 0 && !string.IsNullOrEmpty(uId))
                         {
                             cashoutTasks.Add(Task.Run(async () => {
@@ -150,7 +201,6 @@ public class GameManager
                 resolvingState.Phase = "waiting";
             }
 
-            // Executa todas as devoluções de dinheiro de forma assíncrona, fora do lock
             if (cashoutTasks.Any())
             {
                 await Task.WhenAll(cashoutTasks);
@@ -160,15 +210,7 @@ public class GameManager
             {
                 var dealingState = GetOrCreateTable(tableId);
                 await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", dealingState);
-
-                await Task.Delay(3000);
-
-                lock (dealingState.Players)
-                {
-                    dealingState.Phase = "betting";
-                    dealingState.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
-                }
-                await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", dealingState);
+                // Transição para betting agora é cuidada automaticamente dentro do CheckAndStartGame!
             }
             else
             {
@@ -241,7 +283,7 @@ public class GameManager
                 existingPlayer.ConnectionId = player.ConnectionId;
                 existingPlayer.Name = player.Name;
                 existingPlayer.Avatar = player.Avatar;
-                existingPlayer.LastActiveAt = DateTime.UtcNow; // Atualiza a data do retorno
+                existingPlayer.LastActiveAt = DateTime.UtcNow;
             }
             else
             {
@@ -265,14 +307,15 @@ public class GameManager
         return false;
     }
 
-    // NOVIDADE: Transformado em Task<string?> para poder devolver dinheiro assíncronamente ao desconectar
-    // NOVIDADE: Transformado em Task<(string?, int)> para devolver a mesa e a cadeira exata que o cara estava
     public async Task<(string? tableId, int seat)> RemovePlayerByConnectionIdAsync(string connectionId)
     {
         string? tableId = null;
-        int logicalSeat = -1; // 👇 GUARDA A CADEIRA AQUI
+        int logicalSeat = -1;
         decimal chipsToReturn = 0;
         string userId = string.Empty;
+        bool cashoutNow = false;
+
+        TableState targetTable = null;
 
         foreach (var table in _tables.Values)
         {
@@ -282,32 +325,52 @@ public class GameManager
                 if (player != null)
                 {
                     tableId = table.TableId;
-                    logicalSeat = player.Seat; // 👇 CAPTURA A CADEIRA ANTES DE ZERAR!
-
-                    if (player.IsSeated && player.Status == "playing" && table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
-                    {
-                        player.Status = "out";
-                        table.TurnEndTime = null;
-                        table.Phase = "resolving";
-
-                        PublishHandToRabbitMq(table, player.Seat, 0, 0, 0, false, 0);
-
-                        bool roundEnded = AdvanceTurn(table);
-                        _ = ProcessNextRoundLoop(table.TableId, roundEnded, 2000);
-                    }
+                    logicalSeat = player.Seat;
+                    userId = player.UserId;
+                    targetTable = table;
 
                     if (player.IsSeated)
                     {
-                        chipsToReturn = player.Chips;
-                        userId = player.UserId;
-                        player.TotalCashOut += player.Chips;
-                        player.LastChips = player.Chips;
-                        player.Chips = 0;
-                        player.IsSeated = false;
-                        player.Seat = -1; // Aqui ele perde a cadeira no servidor
+                        // 🔥 CORREÇÃO: O jogador é ejetado IMEDIATAMENTE se a mesa estiver parada, 
+                        // ou se a jogada dele na rodada atual JÁ TERMINOU ("done" ou "out").
+                        bool safeToLeaveInstantly = (table.Phase == "waiting" || player.Status == "done" || player.Status == "out");
+
+                        if (safeToLeaveInstantly)
+                        {
+                            chipsToReturn = player.Chips;
+                            cashoutNow = true;
+
+                            player.TotalCashOut += player.Chips;
+                            player.LastChips = player.Chips;
+                            player.Chips = 0;
+                            player.IsSeated = false;
+                            player.Seat = -1;
+                            player.Status = "waiting";
+                            player.MissedTurns = 0;
+                        }
+                        else
+                        {
+                            // Se ele ainda está "playing" (tem cartas na mão e a rodada não acabou),
+                            // agenda a saída para não bugar a animação/turnos dos outros.
+                            player.LeaveNextHand = true;
+
+                            if (player.Status == "playing")
+                            {
+                                player.Status = "out"; // "Folda" o jogador
+
+                                if (table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
+                                {
+                                    table.TurnEndTime = null;
+                                    table.Phase = "resolving";
+
+                                    PublishHandToRabbitMq(table, player.Seat, 0, 0, 0, false, 0);
+                                    bool roundEnded = AdvanceTurn(table);
+                                    _ = ProcessNextRoundLoop(table.TableId, roundEnded, 2000);
+                                }
+                            }
+                        }
                     }
 
-                    // IMPORTANTE: Remove a conexão, mas NÃO apaga o jogador da memória (para as 6 horas valerem)
                     player.ConnectionId = string.Empty;
                     player.LastActiveAt = DateTime.UtcNow;
                     break;
@@ -315,8 +378,15 @@ public class GameManager
             }
         }
 
-        // Se o jogador tinha fichas na mesa ao cair a conexão, devolve para a carteira real e avisa o front
-        if (chipsToReturn > 0 && !string.IsNullOrEmpty(userId) && !string.IsNullOrEmpty(tableId))
+        // Se ele foi ejetado na hora, notifica a sala para apagar o avatar imediatamente
+        if (cashoutNow && targetTable != null && logicalSeat != -1)
+        {
+            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+            _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("PlayerStoodUp", logicalSeat);
+            _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("TableStateUpdated", targetTable);
+        }
+
+        if (cashoutNow && chipsToReturn > 0 && !string.IsNullOrEmpty(userId) && !string.IsNullOrEmpty(tableId))
         {
             var result = await _walletService.AddCashOutAsync(userId, chipsToReturn, tableId);
             if (result.Success)
@@ -326,12 +396,9 @@ public class GameManager
             }
         }
 
-        // 👇 DEVOLVE A TUPLA COM A MESA E A CADEIRA
         return (tableId, logicalSeat);
     }
 
-
-    // NOVIDADE: Transformado em async Task<bool> para debitar da carteira antes de sentar
     public async Task<bool> SitPlayer(string tableId, string connectionId, int seat, decimal buyIn)
     {
         var table = GetOrCreateTable(tableId);
@@ -347,7 +414,6 @@ public class GameManager
             if (player == null || player.IsSeated) return false;
         }
 
-        // Tenta debitar na carteira real (Fora do lock para não travar o servidor)
         var result = await _walletService.DeductBuyInAsync(player.UserId, buyIn, tableId);
         if (!result.Success) return false;
 
@@ -356,10 +422,8 @@ public class GameManager
 
         lock (table.Players)
         {
-            // Verifica novamente se alguém pegou o assento milissegundos depois
             if (table.Players.Any(p => p.Seat == seat && p.IsSeated))
             {
-                // Cadeira foi pega! Devolve o dinheiro imediatamente e avisa o estorno
                 _ = Task.Run(async () => {
                     var refundResult = await _walletService.AddCashOutAsync(player.UserId, buyIn, tableId);
                     if (refundResult.Success)
@@ -373,29 +437,31 @@ public class GameManager
             player.Seat = seat;
             player.Chips = buyIn;
 
-            // 👇 CORREÇÃO: Matemática de estorno de Cashout 👇
-            // Descobre quanto do Buy-in é dinheiro que ele já tinha na mesa
             decimal returningAmount = Math.Min(buyIn, player.LastChips);
-
-            // Descobre se há dinheiro realmente NOVO (ex: ele perdeu 2k e inteirou pra voltar com 10k)
             decimal freshMoney = buyIn - returningAmount;
 
-            // Estorna o "Cashout" falso do dinheiro que ele trouxe de volta
             player.TotalCashOut -= returningAmount;
-
-            // Só soma no painel de ESTATÍSTICAS se ele colocou dinheiro novo do bolso
             player.TotalBuyIn += freshMoney;
 
-            player.LastChips = 0; // Zera assim que senta na mesa
+            player.LastChips = 0;
             player.IsSeated = true;
             player.Status = (table.Phase == "waiting") ? "waiting" : "out";
             player.LeaveNextHand = false;
             player.LastActiveAt = DateTime.UtcNow;
-            return true;
+            player.MissedTurns = 0; // Inicia com contador zerado
         }
+
+        _ = hubContext.Clients.Group(tableId).SendAsync("PlayerSatDown", seat);
+
+        if (CheckAndStartGame(tableId))
+        {
+            var state = GetOrCreateTable(tableId);
+            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", state);
+        }
+
+        return true;
     }
 
-    // NOVIDADE: Transformado em async Task<bool> para debitar da carteira real no Rebuy
     public async Task<bool> Rebuy(string tableId, string connectionId, decimal amount)
     {
         var table = GetOrCreateTable(tableId);
@@ -407,7 +473,6 @@ public class GameManager
             if (player == null || !player.IsSeated) return false;
         }
 
-        // Tenta debitar na carteira real e avisa o front
         var result = await _walletService.DeductBuyInAsync(player.UserId, amount, tableId);
         if (!result.Success) return false;
 
@@ -420,8 +485,15 @@ public class GameManager
             player.TotalBuyIn += amount;
             player.LastActiveAt = DateTime.UtcNow;
             if (table.Phase == "waiting") player.Status = "waiting";
-            return true;
         }
+
+        if (CheckAndStartGame(tableId))
+        {
+            var state = GetOrCreateTable(tableId);
+            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", state);
+        }
+
+        return true;
     }
 
     public async Task<bool> StandUp(string tableId, string connectionId)
@@ -429,55 +501,78 @@ public class GameManager
         var table = GetOrCreateTable(tableId);
         decimal chipsToReturn = 0;
         string userId = string.Empty;
-        bool wasSeated = false; // FLAG PARA SABER SE ELE ESTAVA SENTADO
+        bool wasSeated = false;
+        bool cashoutNow = false;
+        int oldSeat = -1;
 
         lock (table.Players)
         {
             var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
             if (player != null && player.IsSeated)
             {
-                chipsToReturn = player.Chips;
+                wasSeated = true;
                 userId = player.UserId;
+                oldSeat = player.Seat;
 
-                if (player.Status == "playing" && table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
+                // 🔥 CORREÇÃO: Mesma regra. Se você já apostou ou correu, pode sair da mesa agora.
+                bool safeToLeaveInstantly = (table.Phase == "waiting" || player.Status == "done" || player.Status == "out");
+
+                if (safeToLeaveInstantly)
                 {
-                    player.Status = "out";
-                    table.TurnEndTime = null;
-                    table.Phase = "resolving";
-                    PublishHandToRabbitMq(table, player.Seat, 0, 0, 0, false, 0);
-                    bool roundEnded = AdvanceTurn(table);
-                    _ = ProcessNextRoundLoop(table.TableId, roundEnded, 2000);
+                    chipsToReturn = player.Chips;
+                    cashoutNow = true;
+
+                    player.IsSeated = false;
+                    player.Seat = -1;
+                    player.Status = "waiting";
+                    player.Cards.Clear();
+                    player.LeaveNextHand = false;
+
+                    player.TotalCashOut += player.Chips;
+                    player.LastChips = player.Chips;
+                    player.Chips = 0;
+                    player.LastActiveAt = DateTime.UtcNow;
+                    player.MissedTurns = 0;
                 }
+                else
+                {
+                    // Se estiver aguardando sua vez de jogar ("playing"), agenda para não bugar a mesa
+                    player.LeaveNextHand = true;
 
-                player.IsSeated = false;
-                player.Seat = -1;
-                player.Status = "waiting";
-                player.Cards.Clear();
-                player.LeaveNextHand = false;
-
-                player.TotalCashOut += player.Chips;
-                player.LastChips = player.Chips; // 👇 SALVA A QUANTIDADE QUE TINHA AO LEVANTAR
-                player.Chips = 0;
-                player.LastActiveAt = DateTime.UtcNow;
-
-                wasSeated = true; // MARCAMOS QUE A AÇÃO FOI CONCLUÍDA NO SERVIDOR
+                    if (player.Status == "playing" && table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
+                    {
+                        player.Status = "out";
+                        table.TurnEndTime = null;
+                        table.Phase = "resolving";
+                        PublishHandToRabbitMq(table, player.Seat, 0, 0, 0, false, 0);
+                        bool roundEnded = AdvanceTurn(table);
+                        _ = ProcessNextRoundLoop(table.TableId, roundEnded, 2000);
+                    }
+                }
             }
         }
 
-        // Credita o dinheiro de volta na carteira real se houver fichas
-        if (chipsToReturn > 0 && !string.IsNullOrEmpty(userId))
+        // Envia o pulso pro Front-End sumir com o Avatar da cadeira IMEDIATAMENTE
+        if (cashoutNow && oldSeat != -1)
+        {
+            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+            _ = hubContext.Clients.Group(tableId).SendAsync("PlayerStoodUp", oldSeat);
+            _ = hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+        }
+
+        // Faz o saque
+        if (cashoutNow && chipsToReturn > 0 && !string.IsNullOrEmpty(userId))
         {
             var result = await _walletService.AddCashOutAsync(userId, chipsToReturn, tableId);
             if (result.Success)
             {
                 var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
                 await hubContext.Clients.Group($"user_{userId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
-                return true; // Retorna true porque devolveu com sucesso
+                return true;
             }
-            return false; // Retorna false APENAS se deu erro na API da carteira
+            return false;
         }
 
-        // Se ele não tinha fichas, mas estava sentado e levantou, retorna true para o front atualizar!
         return wasSeated;
     }
 
@@ -536,10 +631,36 @@ public class GameManager
                 _tableDecks[tableId] = deck;
 
                 table.CurrentTurnSeat = eligiblePlayers[0].Seat;
+
+                _ = TransitionToBettingAsync(tableId);
+
                 return true;
             }
         }
         return false;
+    }
+
+    private async Task TransitionToBettingAsync(string tableId)
+    {
+        await Task.Delay(3000);
+        var table = GetOrCreateTable(tableId);
+        bool shouldBroadcast = false;
+
+        lock (table.Players)
+        {
+            if (table.Phase == "dealing")
+            {
+                table.Phase = "betting";
+                table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+                shouldBroadcast = true;
+            }
+        }
+
+        if (shouldBroadcast)
+        {
+            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+        }
     }
 
     public bool SkipTurn(string tableId, string connectionId, out int seat, out bool roundEnded)
@@ -559,6 +680,8 @@ public class GameManager
             table.TurnEndTime = null;
             table.Phase = "resolving";
             player.LastActiveAt = DateTime.UtcNow;
+
+            player.MissedTurns = 0;
 
             PublishHandToRabbitMq(table, seat, 0, 0, 0, false, 0);
 
@@ -592,6 +715,8 @@ public class GameManager
             table.TurnEndTime = null;
             table.Phase = "resolving";
             player.LastActiveAt = DateTime.UtcNow;
+
+            player.MissedTurns = 0;
 
             playedCards = player.Cards.ToArray();
             centerCardRevealed = table.CenterCard;
@@ -713,4 +838,54 @@ public class GameManager
         string rank = card.Substring(0, card.Length - 1);
         return ranks.IndexOf(rank);
     }
+
+
+    // 👇 MÉTODO 1: Para o DevController conseguir ler o baralho restante 👇
+    public List<string> GetDevTableDeck(string tableId)
+    {
+        if (_tableDecks.TryGetValue(tableId, out var deck))
+        {
+            return deck;
+        }
+        return new List<string>();
+    }
+
+    // 👇 MÉTODO 2: Para o DevController conseguir trocar a vira e atualizar as listas 👇
+    // 👇 MÉTODO 2 CORRIGIDO PARA O BACKEND.GAME (MEINHO) 👇
+    public bool SwapViraDevMode(string tableId, string newCenterCard, string? oldCenterCard, int deckIndex)
+    {
+        var table = GetOrCreateTable(tableId);
+
+        lock (table.Players)
+        {
+            if (!_tableDecks.TryGetValue(tableId, out var deck))
+                return false;
+
+            // 1. Define a nova carta (No Backend.Game a propriedade é CenterCard)
+            table.CenterCard = newCenterCard;
+
+            // 2. Remove a carta nova do baralho
+            if (deckIndex >= 0 && deckIndex < deck.Count && deck[deckIndex] == newCenterCard)
+            {
+                deck.RemoveAt(deckIndex);
+            }
+            else
+            {
+                deck.Remove(newCenterCard);
+            }
+
+            // 3. Devolve a carta antiga para o baralho (se houver)
+            if (!string.IsNullOrEmpty(oldCenterCard) && oldCenterCard != "Nenhuma")
+            {
+                deck.Add(oldCenterCard);
+            }
+
+            // 4. A linha do StockPileCount foi removida porque o Meinho 
+            // não usa essa propriedade no TableState.
+
+            return true;
+        }
+    }
+
+
 }

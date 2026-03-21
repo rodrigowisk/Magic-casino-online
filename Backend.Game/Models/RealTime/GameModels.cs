@@ -21,7 +21,6 @@ public class TableState
     public decimal MinBuyIn { get; set; } = 100;
     public DateTime ExpiresAt { get; set; }
 
-    // 👇 NOVO: Guarda a capa da mesa na memória
     public string CoverImage { get; set; } = "casino.webp";
 
     public List<PlayerState> Players { get; set; } = new();
@@ -48,4 +47,7 @@ public class PlayerState
     public string Status { get; set; } = "waiting";
     public bool LeaveNextHand { get; set; } = false;
     public List<string> Cards { get; set; } = new();
+
+    // 🔥 NOVO: Contador de vezes seguidas que o tempo estourou 🔥
+    public int MissedTurns { get; set; } = 0;
 }

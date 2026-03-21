@@ -313,7 +313,6 @@ const cachetaHub = useCachetaHub(tableId, currentUserId, currentUserName, curren
     onWalletBalanceUpdated: (newBalance: number) => {
         userTotalBalance.value = newBalance;
     },
-    // 👇 RECEBE O EVENTO FUROU AQUI 👇
     onPlayerFurou: (data: any) => {
         furouData.value = data;
         
@@ -345,6 +344,11 @@ const engine = new CachetaPixiEngine(gameState, {
     onCardSelected: (cardStr: string | null) => {
         selectedCardToDiscard.value = cardStr;
     },
+
+    onHandReordered: (newOrder) => {
+        cachetaHub.reorderHand(newOrder);
+    },
+
     sitDown: async (visualSeatIndex: number) => {
         if (gameState.players.some(p => p.isHero && p.isSeated)) return;
         
@@ -411,6 +415,20 @@ function applyState(serverState: any) {
       let tCashOut = Number(p.totalCashOut ?? p.TotalCashOut ?? 0);
       let tLastChips = Number(p.lastChips ?? p.LastChips ?? 0);
 
+      // 👇 TRAVA DE MEMÓRIA VISUAL: Impede o backend de esmagar sua organização manual 👇
+      let sCards = p.cards || p.Cards || [];
+      if (currentUserId && (String(p.userId) === currentUserId || String(p.UserId) === currentUserId)) {
+          const existingHero = gameState.players.find((ep: any) => ep.userId === currentUserId);
+          if (existingHero && existingHero.serverCards) {
+              const oldSorted = [...existingHero.serverCards].sort().join(',');
+              const newSorted = [...sCards].sort().join(',');
+              
+              if (oldSorted === newSorted && oldSorted.length > 0) {
+                  sCards = [...existingHero.serverCards]; // Copia do jeito exato que estava antes
+              }
+          }
+      }
+
       return {
           userId: String(p.userId || p.UserId || ''),
           connectionId: String(p.connectionId || p.ConnectionId || ''),
@@ -421,7 +439,7 @@ function applyState(serverState: any) {
           totalBuyIn: tBuyIn,
           totalCashOut: tCashOut,
           lastChips: tLastChips,
-          cards: p.cards || p.Cards || [],
+          cards: sCards, // Usa as cartas arrumadas ou as que vieram mesmo
           status: String(p.status || p.Status || 'waiting').toLowerCase(),
           avatar: String(p.avatar || p.Avatar || 'default.webp'),
           hasDrawnThisTurn: !!(p.hasDrawnThisTurn || p.HasDrawnThisTurn),
@@ -569,7 +587,7 @@ function applyState(serverState: any) {
           const timeToStart = normState.turnTimeLeft > 0 ? normState.turnTimeLeft : 60;
           engine.startTimer(newVisualTurn, timeToStart);
       }
-  } else if (gameState.phase !== 'betting') {
+  } else{
       gameState.currentTurn = -1;
       engine.stopTimer();
   }
@@ -702,7 +720,6 @@ onUnmounted(() => {
 .winner-banner h2 { color: #ffaa00; margin: 0 0 10px 0; font-size: 26px; font-weight: 900; text-shadow: 0 0 15px rgba(255, 170, 0, 0.8); }
 .winner-banner p { color: white; font-size: 15px; margin: 0; }
 
-/* 👇 ESTILOS DO NOVO BANNER DE FURO 👇 */
 .furou-banner {
   position: absolute;
   top: 35%;

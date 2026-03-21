@@ -5,7 +5,6 @@ export interface CachetaHubCallbacks {
     onWalletBalanceUpdated?: (newBalance: number) => void; 
     onPlayerWon?: (data: { seat: number, name: string, groups: string[][] }) => void; 
     onPromptNextRound?: () => void;
-    // 👇 NOVO EVENTO 👇
     onPlayerFurou?: (data: { seat: number, name: string, cards: string[] }) => void;
 }
 
@@ -38,7 +37,6 @@ export function useCachetaHub(tableId: string, currentUserId: string, currentUse
                 if (callbacks.onPromptNextRound) callbacks.onPromptNextRound();
             });
 
-            // 👇 ESCUTANDO O FURO DO SERVIDOR 👇
             hubConnection.on("PlayerFurou", (data: any) => {
                 if (callbacks.onPlayerFurou) callbacks.onPlayerFurou(data);
             });
@@ -94,8 +92,16 @@ export function useCachetaHub(tableId: string, currentUserId: string, currentUse
         if (hubConnection) await hubConnection.invoke("ReadyForNextRound", tableId);
     };
 
+    // 👇 NOVO: FUNÇÃO PARA AVISAR O SERVIDOR DA NOVA ORDEM DAS CARTAS 👇
+    const reorderHand = async (newOrder: string[]) => {
+        if (hubConnection) {
+            await hubConnection.invoke("ReorderHand", tableId, newOrder).catch(console.error);
+        }
+    };
+
     return {
         connect, disconnect, getConnectionId, updateAvatar, sitDown, rebuy, standUp, 
-        setLeaveNextHand, drawCard, discardCard, declareWin, readyForNextRound
+        setLeaveNextHand, drawCard, discardCard, declareWin, readyForNextRound,
+        reorderHand // 👇 EXPORTADO AQUI 👇
     };
 }

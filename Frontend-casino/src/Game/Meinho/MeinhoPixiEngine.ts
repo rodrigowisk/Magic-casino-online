@@ -253,6 +253,37 @@ export class MeinhoPixiEngine {
         this.heroPixiCards = []; 
     }
 
+    public clearPlayerCards(seatIndex: number) {
+        const currentPlayer = this.gameState.players[seatIndex];
+        if (!currentPlayer) return;
+
+        let cardsToTrash: PIXI.Container[] = [];
+        
+        // Pega as cartas da UI desse jogador
+        if (currentPlayer.uiCards && currentPlayer.uiCards.length > 0) {
+            cardsToTrash.push(...(currentPlayer.uiCards as PIXI.Container[]));
+        }
+
+        // Se for o herói, pega as cartas dele também para não sobrar rastro
+        if (currentPlayer.isHero && this.heroPixiCards && this.heroPixiCards.length > 0) {
+            this.heroPixiCards.forEach(c => {
+                if (!cardsToTrash.includes(c)) cardsToTrash.push(c);
+            });
+            this.heroPixiCards = [];
+        }
+
+        // Apaga as cartas da tela e da memória instantaneamente
+        cardsToTrash.forEach(card => {
+            const idx = this.dealtCardsUI.indexOf(card);
+            if (idx !== -1) {
+                this.dealtCardsUI.splice(idx, 1);
+            }
+            this.safeDestroy(card);
+        });
+
+        currentPlayer.uiCards = [];
+    }
+
     public setHeroCardsVisibility(visible: boolean) {
         this.isHeroCardsHidden = !visible;
         if (this.heroPixiCards) {
@@ -269,7 +300,10 @@ export class MeinhoPixiEngine {
         const safeTime = Math.min(timeLeftSeconds || this.TIMER_DURATION_SEC, this.TIMER_DURATION_SEC);
         this.turnEndTime = Date.now() + (safeTime * 1000);
         
-        if (this.playerSeats[seatIndex]) this.playerSeats[seatIndex].startTimer();
+        if (this.playerSeats[seatIndex]) {
+            this.playerSeats[seatIndex].resetFilter(); 
+            this.playerSeats[seatIndex].startTimer();
+        }
     }
 
     public stopTimer() {
@@ -501,6 +535,10 @@ export class MeinhoPixiEngine {
         if (!currentPlayer) return;
 
         if (this.activeTimerSeat === seatIndex) this.stopTimer(); 
+
+        if (this.playerSeats[seatIndex]) {
+            this.playerSeats[seatIndex].resetFilter();
+        }
 
         let revealedCards = playedCards || [];
         let centerCard = centerCardRevealed || "2♥";
@@ -770,7 +808,10 @@ export class MeinhoPixiEngine {
         }
         if (finalCenterCard) cardsToTrash.push(finalCenterCard);
 
-        await MeinhoAnimator.discardCards(this, cardsToTrash);
+        if (cardsToTrash.length > 0) {
+            this.tocarSom(this.somPular);
+            await MeinhoAnimator.discardCards(this, cardsToTrash);
+        }
         
         if (currentPlayer.isHero) {
             this.heroPixiCards = [];
@@ -857,14 +898,14 @@ export class MeinhoPixiEngine {
 
     public pixiDelay(ms: number): Promise<void> {
         return new Promise(resolve => {
-            if (!this.app || !this.app.ticker) {
+            if (!this.app || !this.app.ticker || document.hidden) {
                 resolve();
                 return;
             }
             let elapsed = 0;
             const tick = (ticker: PIXI.Ticker) => {
                 elapsed += ticker.deltaMS;
-                if (elapsed >= ms) {
+                if (elapsed >= ms || document.hidden) {
                     if (this.app && this.app.ticker) {
                         this.app.ticker.remove(tick);
                     }

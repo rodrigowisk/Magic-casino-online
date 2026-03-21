@@ -137,7 +137,12 @@
                             <div class="avatar-image-container">
                               <img :src="getAvatarUrl(player?.avatar)" alt="Avatar" class="avatar-img" />
                             </div>
-                            <span class="text-white player-name">{{ player.username || player.name }}</span>
+                            <span 
+                              class="player-name font-bold"
+                              :class="(player.username === currentUserName || player.name === currentUserName) && currentUserName !== '' ? 'text-yellow' : 'text-white'"
+                            >
+                              {{ player.username || player.name }}
+                            </span>
                           </div>
                         </td>
                         <td class="text-right text-neon">{{ formatCurrency(player.balance || 0) }}</td>
@@ -294,6 +299,13 @@ import { agentService } from '../services/agentService';
 
 const router = useRouter();
 
+// ==============================================================
+// DADOS DO USUÁRIO LOGADO (Para identificar o próprio agente)
+// ==============================================================
+const currentUserId = String(localStorage.getItem('magic_userid') || '').trim();
+const currentUserName = String(localStorage.getItem('magic_username') || '').trim();
+const currentAvatar = String(localStorage.getItem('magic_avatar') || 'default.webp').trim();
+
 const isLoading = ref(true);
 const isProcessing = ref(false);
 const isAgent = ref(false);
@@ -344,6 +356,22 @@ const getAvatarUrl = (filename?: string) => {
   return avatarImages[path] || avatarImages['../assets/imagens/avatars/default.webp'];
 };
 
+// 👇 Busca o saldo real da conta de jogador do Agente na Identity API
+const fetchMyPlayerBalance = async () => {
+  if (!currentUserId) return 0;
+  try {
+    const IDENTITY_API_URL = import.meta.env.VITE_IDENTITY_API_URL || 'http://localhost:5001';
+    const response = await fetch(`${IDENTITY_API_URL}/api/wallet/${currentUserId}/balance`);
+    if (response.ok) {
+      const data = await response.json();
+      return data.balance || 0;
+    }
+  } catch(e) {
+    console.error("Erro ao buscar saldo de jogador do agente:", e);
+  }
+  return 0;
+};
+
 const carregarPainel = async () => {
   isLoading.value = true;
   try {
@@ -352,11 +380,31 @@ const carregarPainel = async () => {
       agentData.value = data;
       isAgent.value = true;
 
-      if (data.players || data.Players) {
-        playersList.value = data.players || data.Players;
-      } else {
-        playersList.value = [];
+      let pList = data.players || data.Players || [];
+
+      // 👇 Identifica se o agente já veio na lista do backend
+      const myIndex = pList.findIndex((p: any) => p.username === currentUserName || p.name === currentUserName);
+      
+      // Busca o saldo atualizado da conta de jogador do agente
+      const myBalance = await fetchMyPlayerBalance();
+
+      if (myIndex !== -1) {
+          // Se achou, atualiza o saldo e move ele pro topo da lista
+          const me = pList.splice(myIndex, 1)[0];
+          me.balance = myBalance;
+          pList.unshift(me);
+      } else if (currentUserName !== '') {
+          // Se não veio na lista, injeta a própria conta no topo manualmente
+          pList.unshift({
+              username: currentUserName,
+              name: currentUserName,
+              avatar: currentAvatar,
+              balance: myBalance,
+              commission: 0
+          });
       }
+
+      playersList.value = pList;
 
       if (data.history || data.History) {
         transactionsList.value = data.history || data.History;
@@ -443,7 +491,7 @@ const confirmarTransferencia = async () => {
          playersList.value[playerIndex].balance += valorNum;
       }
 
-      // 🔥 Adiciona ao histórico (Envio) refletindo apenas o Nome 🔥
+      // Adiciona ao histórico (Envio)
       transactionsList.value.unshift({
         id: Date.now(),
         date: dataAtual,
@@ -468,7 +516,7 @@ const confirmarTransferencia = async () => {
          playersList.value[playerIndex].balance -= valorNum;
       }
 
-      // 🔥 Adiciona ao histórico (Retirada) refletindo apenas o Nome 🔥
+      // Adiciona ao histórico (Retirada)
       transactionsList.value.unshift({
         id: Date.now(),
         date: dataAtual,
@@ -512,6 +560,15 @@ onMounted(() => {
 .text-neon {
   color: #39FF14;
   font-weight: 900;
+}
+
+/* 🔥 BADGE DO PRÓPRIO AGENTE 🔥 */
+.badge-voce {
+  color: #f59e0b;
+  font-size: 10px;
+  font-weight: 900;
+  margin-left: 6px;
+  text-transform: uppercase;
 }
 
 /* UTILS */

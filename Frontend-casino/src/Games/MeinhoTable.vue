@@ -39,7 +39,7 @@
         <div class="ui-layer">
           <div class="controls-wrapper" v-if="gameState.phase === 'betting' && !isDealing && !isAnimating && gameState.players[gameState.currentTurn]?.isHero && gameState.players[gameState.currentTurn]?.status === 'playing'">
             <BettingControls 
-              :minBet="Math.min(gameState.minBet, gameState.players[gameState.currentTurn]?.chips || gameState.minBet)"
+              :minBet="Math.min(gameState.minBet, gameState.pot, gameState.players[gameState.currentTurn]?.chips || gameState.minBet)"
               :maxBet="Math.min(gameState.pot, gameState.players[gameState.currentTurn]?.chips || gameState.pot)"
               @pular="invokeSkipBet"
               @apostar="invokeConfirmBet"
@@ -284,11 +284,9 @@ const verificarAberturaFilar = () => {
       }
     };
 
-    // 👇 SOLUÇÃO: Espera distribuição E animações da engine terminarem!
     if (isDealing.value || isAnimating.value) {
       const unwatch = watch([() => isDealing.value, () => isAnimating.value], ([dealing, animating]) => {
         if (!dealing && !animating) {
-          // 800ms de respiro para as cartas "assentarem" na mesa antes de aparecer o botão
           peekTimeoutId = setTimeout(tryOpenPeeker, 800); 
           unwatch(); 
         }
@@ -375,7 +373,8 @@ async function fetchUserBalance() {
 const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvatar, {
     onReceiveTableState: (serverState: any) => syncTable(serverState),
     onPlayerSkipped: async (logicalSeat: number) => {
-        if(!animModeEnabled.value) { flushPendingState(); return; }
+        if(!animModeEnabled.value || document.hidden) { flushPendingState(); return; }
+        
         isAnimating.value = true;
         try {
             const visualSeat = (logicalSeat - myLogicalSeatOffset.value + gameState.maxPlayers) % gameState.maxPlayers;
@@ -388,7 +387,8 @@ const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvata
         }
     },
     onPlayerBetted: async (logicalSeat: number, betAmount: number, isWin: boolean, potBroken: boolean, playedCards: string[], centerCardRevealed: string) => {
-        if(!animModeEnabled.value) { flushPendingState(); return; }
+        if(!animModeEnabled.value || document.hidden) { flushPendingState(); return; }
+        
         isAnimating.value = true;
         try {
             const visualSeat = (logicalSeat - myLogicalSeatOffset.value + gameState.maxPlayers) % gameState.maxPlayers;
@@ -401,19 +401,19 @@ const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvata
             flushPendingState();
         }
     },
+
+
     onWalletBalanceUpdated: (newBalance: number) => {
         userTotalBalance.value = newBalance;
     },
     
-    // 👇 EVENTOS MÁGICOS CORRIGIDOS PARA O HERÓI 👇
     onPlayerSatDown: (logicalSeat: number) => {
         let offsetToUse = myLogicalSeatOffset.value;
         
-        // Se fomos nós que acabamos de clicar, antecipamos o giro da mesa!
         if (logicalSeat === expectedHeroLogicalSeat.value) {
             offsetToUse = logicalSeat;
             myLogicalSeatOffset.value = logicalSeat; 
-            expectedHeroLogicalSeat.value = -1; // Limpa a memória
+            expectedHeroLogicalSeat.value = -1; 
         }
 
         const visualSeat = (logicalSeat - offsetToUse + gameState.maxPlayers) % gameState.maxPlayers;
@@ -445,7 +445,6 @@ const engine = new MeinhoPixiEngine(gameState, {
         const minBuyIn = gameState.tableMinBuyIn;
 
         if (myLastChips.value >= minBuyIn) {
-            // 🔥 MARCA A CADEIRA QUE VOCÊ CLICOU NA MEMÓRIA 🔥
             expectedHeroLogicalSeat.value = logicalSeat; 
             gameHub.sitDown(logicalSeat, myLastChips.value).then(() => {
                 fetchUserBalance();
@@ -454,7 +453,7 @@ const engine = new MeinhoPixiEngine(gameState, {
                 }
             }).catch(e => {
                 console.error("Erro ao sentar automaticamente:", e);
-                expectedHeroLogicalSeat.value = -1; // Limpa em caso de erro
+                expectedHeroLogicalSeat.value = -1; 
             });
             return;
         }
@@ -470,7 +469,6 @@ function invokeBuyIn(amount: number) {
         showBuyInModal.value = false;
         pendingSitSeat.value = -1;
         
-        // 🔥 MARCA A CADEIRA QUE VOCÊ CLICOU NA MEMÓRIA 🔥
         expectedHeroLogicalSeat.value = seatToSit; 
 
         gameHub.sitDown(seatToSit, amount).then(() => {
@@ -478,7 +476,7 @@ function invokeBuyIn(amount: number) {
             sessionStartTime.value = new Date().toISOString();
         }).catch(e => {
             console.error("Erro ao sentar:", e);
-            expectedHeroLogicalSeat.value = -1; // Limpa em caso de erro
+            expectedHeroLogicalSeat.value = -1; 
         });
     }
 }
@@ -743,6 +741,15 @@ function invokeConfirmBet(payload: number | string | { amount: number }) {
     else if (typeof payload === 'string' && !isNaN(Number(payload))) betValue = Number(payload);
     else if (payload && typeof payload === 'object' && 'amount' in payload) betValue = Number(payload.amount);
     
+    // 🔥 CORREÇÃO: Garante que NUNCA envie uma aposta maior que o Pote ou maior que as fichas
+    const hero = gameState.players.find(p => p.isHero);
+    const heroChips = hero ? hero.chips : 0;
+    const maxAllowed = Math.min(gameState.pot, heroChips);
+    
+    if (betValue > maxAllowed) {
+        betValue = maxAllowed;
+    }
+    
     gameHub.confirmBet(betValue);
 }
 
@@ -833,9 +840,24 @@ function handleTogglePeek(enabled: boolean) {
 
 watch(() => gameState.pot, (newPot) => { engine.updatePotText(newPot); });
 
+const handleVisibilityChange = () => {
+  if (document.visibilityState === 'visible') {
+    isAnimating.value = false;
+    isDealing.value = false;
+    isDiscarding3D.value = false;
+    
+    if (pendingState) {
+      applyState(pendingState);
+      pendingState = null;
+    }
+    if (engine) engine.updateDeckVisibility();
+  }
+};
+
 onMounted(async () => {
   calculateScale();
   window.addEventListener('resize', calculateScale);
+  document.addEventListener('visibilitychange', handleVisibilityChange); 
 
   await fetchUserBalance();
 
@@ -857,9 +879,13 @@ onMounted(async () => {
 onUnmounted(() => {
   if (peekTimeoutId) clearTimeout(peekTimeoutId);
   window.removeEventListener('resize', calculateScale);
+  document.removeEventListener('visibilitychange', handleVisibilityChange); 
   gameHub.disconnect();
   engine.destroy();
 });
+
+
+
 </script>
 
 <style scoped>

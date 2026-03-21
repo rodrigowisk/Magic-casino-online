@@ -9,7 +9,7 @@
 
       <div class="modal-body">
         <div v-if="groupedHands.length === 0" class="empty-state">
-          Nenhuma mão jogada por você nesta sessão ainda.
+          Nenhuma mão registrada nesta sessão ainda.
         </div>
 
         <div v-else class="round-container">
@@ -123,7 +123,7 @@ const currentIndex = ref(0);
 
 watch(() => props.isOpen, (newVal) => {
   if (newVal) {
-    currentIndex.value = 0;
+    currentIndex.value = 0; // Sempre reseta para mostrar a mais recente (Index 0)
   }
 });
 
@@ -132,28 +132,38 @@ const truncateName = (name: string) => {
   return name.length > 10 ? name.substring(0, 10) + '...' : name;
 };
 
+// Lógica de Agrupamento 100% Corrigida
 const groupedHands = computed(() => {
   if (!props.history || props.history.length === 0) return [];
 
+  // 1. Garante que o histórico está em ordem cronológica antes de agrupar
+  const sortedHistory = [...props.history].sort((a, b) => 
+    new Date(a.playedAt).getTime() - new Date(b.playedAt).getTime()
+  );
+
   const groups: any[] = [];
 
-  props.history.forEach(item => {
+  sortedHistory.forEach(item => {
     const lastGroup = groups[groups.length - 1];
     let added = false;
 
     if (lastGroup) {
-      const t1 = new Date(lastGroup.playedAt).getTime();
+      // Usa a última ação registrada na mão para calcular o tempo
+      const lastItemInGroup = lastGroup.players[lastGroup.players.length - 1];
+      const t1 = new Date(lastItemInGroup.playedAt).getTime();
       const t2 = new Date(item.playedAt).getTime();
       
-      if (Math.abs(t1 - t2) < 90 * 1000) { 
-        const existingPlayer = lastGroup.players.find((p: any) => p.playerId === item.playerId);
-        if (!existingPlayer) {
-          lastGroup.players.push(item);
-        }
+      // Se este jogador JÁ ESTÁ neste grupo, é obrigatoriamente uma mão NOVA.
+      const playerAlreadyInGroup = lastGroup.players.some((p: any) => p.playerId === item.playerId);
+
+      // Agrupa se ocorreu em menos de 60 segundos desde a última ação E o jogador ainda não jogou nesta mão
+      if (Math.abs(t2 - t1) < 60 * 1000 && !playerAlreadyInGroup) {
+        lastGroup.players.push(item);
         added = true;
       }
     }
 
+    // Cria uma nova "Mão" se as validações acima falharem (ou seja, nova rodada começou)
     if (!added) {
       groups.push({
         id: item.id,
@@ -163,9 +173,8 @@ const groupedHands = computed(() => {
     }
   });
 
-  return groups.filter(group => 
-    group.players.some((p: any) => p.playerId === props.currentUserId)
-  );
+  // 2. Inverte o array para que o Index 0 (a tela inicial do modal) seja sempre a mão mais nova!
+  return groups.reverse();
 });
 
 const currentRound = computed(() => {
@@ -173,6 +182,7 @@ const currentRound = computed(() => {
   return groupedHands.value[currentIndex.value];
 });
 
+// A inversão de botões faz sentido agora: "prevPage" vai para o Index menor (mais recente)
 const prevPage = () => {
   if (currentIndex.value > 0) currentIndex.value--;
 };

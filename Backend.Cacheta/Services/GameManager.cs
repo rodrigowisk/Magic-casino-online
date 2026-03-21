@@ -38,25 +38,49 @@ public class GameManager
         _serverTickTimer = new Timer(CheckTimeouts, null, 1000, 1000);
     }
 
+    // 👇 MÁGICA PARA O HOT-RELOAD DO VITE NÃO TRAVAR A MESA 👇
+    private void CheckAndResetAbandonedTable(TableState table)
+    {
+        // Se sobrou menos de 2 jogadores jogando, a mesa tem que abortar a partida e voltar a ficar "waiting"
+        int activePlayers = table.Players.Count(p => p.IsSeated && p.Status == "playing");
+        if (table.Phase != "waiting" && activePlayers < 2)
+        {
+            table.Phase = "waiting";
+            table.CurrentTurnSeat = -1;
+            table.TurnEndTime = null;
+            table.ViraCard = string.Empty;
+            table.DiscardPile.Clear();
+            table.StockPileCount = 0;
+
+            // Reseta os jogadores que sobraram (se houver 1)
+            foreach (var p in table.Players.Where(p => p.IsSeated))
+            {
+                p.Status = "waiting";
+                p.Cards.Clear();
+                p.HasDrawnThisTurn = false;
+                p.HasFurou = false;
+            }
+        }
+    }
     private void CheckTimeouts(object? state)
     {
         foreach (var table in _tables.Values)
         {
-            bool isTimeout = false;
-            int timeoutSeat = -1;
+            bool stateChanged = false;
 
             lock (table.Players)
             {
-                if (table.Phase == "betting" && table.TurnEndTime.HasValue && DateTime.UtcNow >= table.TurnEndTime.Value)
+                if (table.Phase == "betting" && table.TurnEndTime.HasValue)
                 {
-                    isTimeout = true;
-                    timeoutSeat = table.CurrentTurnSeat;
-                    table.TurnEndTime = null;
+                    double timeRemaining = (table.TurnEndTime.Value - DateTime.UtcNow).TotalSeconds;
+                    var player = table.Players.FirstOrDefault(p => p.Seat == table.CurrentTurnSeat);
 
-                    var player = table.Players.FirstOrDefault(p => p.Seat == timeoutSeat);
-                    if (player != null)
+                    if (player != null && player.Status == "playing")
                     {
-                        if (!player.HasDrawnThisTurn)
+                        double autoDrawThreshold = TurnDurationSeconds * 0.25;
+
+                        // 1. Faltando 25% do tempo ou menos: COMPRA AUTOMÁTICA
+                        if (timeRemaining <= autoDrawThreshold && !player.HasDrawnThisTurn)
                         {
                             if (_tableDecks.TryGetValue(table.TableId, out var deck))
                             {
@@ -64,7 +88,6 @@ public class GameManager
                                 {
                                     var newDeck = new List<string>(table.DiscardPile);
                                     table.DiscardPile.Clear();
-
                                     var rnd = new Random();
                                     deck = newDeck.OrderBy(x => rnd.Next()).ToList();
                                     _tableDecks[table.TableId] = deck;
@@ -76,29 +99,43 @@ public class GameManager
                                     deck.RemoveAt(0);
                                     player.Cards.Add(drawnCard);
                                     table.StockPileCount = deck.Count;
+
+                                    player.HasDrawnThisTurn = true;
+                                    stateChanged = true;
                                 }
                             }
                         }
 
-                        if (player.Cards.Count > 0)
+                        // 2. Faltando 0 segundos: DESCARTE AUTOMÁTICO (E passa a vez)
+                        if (timeRemaining <= 0)
                         {
-                            string cardToDiscard = player.Cards.Last();
-                            player.Cards.Remove(cardToDiscard);
-                            table.DiscardPile.Add(cardToDiscard);
-                        }
+                            table.TurnEndTime = null;
 
-                        player.HasDrawnThisTurn = false;
-                        AdvanceTurn(table);
-                        table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
+                            if (player.Cards.Count > 0)
+                            {
+                                string cardToDiscard = player.Cards.Last();
+                                player.Cards.Remove(cardToDiscard);
+                                table.DiscardPile.Add(cardToDiscard);
+                            }
+
+                            player.HasDrawnThisTurn = false;
+                            AdvanceTurn(table);
+                            table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
+                            stateChanged = true;
+                        }
                     }
                 }
 
+                // Limpeza de fantasmas e verificação de mesa vazia
                 table.Players.RemoveAll(p => !p.IsSeated && string.IsNullOrEmpty(p.ConnectionId) && p.LastActiveAt < DateTime.UtcNow.AddHours(-6));
+                CheckAndResetAbandonedTable(table);
             }
 
-            if (isTimeout)
+            // Se o servidor agiu por tempo (comprou ou descartou), avisa o frontend
+            if (stateChanged)
             {
-                var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+                using var scope = _scopeFactory.CreateScope();
+                var hubContext = scope.ServiceProvider.GetRequiredService<IHubContext<GameHub>>();
                 _ = hubContext.Clients.Group(table.TableId).SendAsync("TableStateUpdated", table);
             }
         }
@@ -106,84 +143,83 @@ public class GameManager
 
     public async Task ProcessNextRoundLoop(string tableId, bool roundEnded, int delayMs)
     {
-        var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-
-        var resolvingState = GetOrCreateTable(tableId);
-        lock (resolvingState.Players)
+        try
         {
-            resolvingState.Phase = "resolving";
-        }
-        await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", resolvingState);
+            // 👇 CORREÇÃO: Cria um escopo seguro para o serviço em background 👇
+            using var scope = _scopeFactory.CreateScope();
+            var hubContext = scope.ServiceProvider.GetRequiredService<IHubContext<GameHub>>();
 
-        await Task.Delay(delayMs);
-
-        if (roundEnded)
-        {
-            List<Task> cashoutTasks = new List<Task>();
-
+            var resolvingState = GetOrCreateTable(tableId);
             lock (resolvingState.Players)
             {
-                foreach (var p in resolvingState.Players)
+                resolvingState.Phase = "resolving";
+            }
+            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", resolvingState);
+
+            await Task.Delay(delayMs);
+
+            if (roundEnded)
+            {
+                List<Task> cashoutTasks = new List<Task>();
+
+                lock (resolvingState.Players)
                 {
-                    p.Cards.Clear();
-                    p.HasDrawnThisTurn = false;
-                    p.HasFurou = false; // 👇 ZERA A PUNIÇÃO DE FURO PRA NOVA RODADA 👇
-
-                    if (p.LeaveNextHand)
+                    foreach (var p in resolvingState.Players)
                     {
-                        decimal refund = p.Chips;
-                        string uId = p.UserId;
+                        p.Cards.Clear();
+                        p.HasDrawnThisTurn = false;
+                        p.HasFurou = false;
 
-                        p.IsSeated = false;
-                        p.Seat = -1;
-                        p.LeaveNextHand = false;
-                        p.Status = "waiting";
-                        p.TotalCashOut += p.Chips;
-                        p.LastChips = p.Chips;
-                        p.Chips = 0;
-                        p.LastActiveAt = DateTime.UtcNow;
-
-                        if (refund > 0 && !string.IsNullOrEmpty(uId))
+                        if (p.LeaveNextHand)
                         {
-                            cashoutTasks.Add(Task.Run(async () => {
-                                var result = await _walletService.AddCashOutAsync(uId, refund, tableId);
-                                if (result.Success)
+                            decimal refund = p.Chips;
+                            string uId = p.UserId;
+
+                            p.IsSeated = false;
+                            p.Seat = -1;
+                            p.LeaveNextHand = false;
+                            p.Status = "waiting";
+                            p.TotalCashOut += p.Chips;
+                            p.LastChips = p.Chips;
+                            p.Chips = 0;
+                            p.LastActiveAt = DateTime.UtcNow;
+
+                            if (refund > 0 && !string.IsNullOrEmpty(uId))
+                            {
+                                cashoutTasks.Add(Task.Run(async () =>
                                 {
-                                    var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-                                    await hubCtx.Clients.Group($"user_{uId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
-                                }
-                            }));
+                                    var walletSvc = scope.ServiceProvider.GetRequiredService<IWalletService>();
+                                    var result = await walletSvc.AddCashOutAsync(uId, refund, tableId);
+                                    if (result.Success)
+                                        await hubContext.Clients.Group($"user_{uId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
+                                }));
+                            }
+                        }
+                        else if (p.IsSeated)
+                        {
+                            p.Status = "waiting";
                         }
                     }
-                    else if (p.IsSeated)
-                    {
-                        p.Status = "waiting";
-                    }
+
+                    resolvingState.ViraCard = string.Empty;
+                    resolvingState.DiscardPile.Clear();
+                    resolvingState.StockPileCount = 0;
+                    resolvingState.Phase = "waiting";
                 }
 
-                resolvingState.ViraCard = string.Empty;
-                resolvingState.DiscardPile.Clear();
-                resolvingState.StockPileCount = 0;
-                resolvingState.Phase = "waiting";
+                if (cashoutTasks.Any()) await Task.WhenAll(cashoutTasks);
+
+                var finalWaitingState = GetOrCreateTable(tableId);
+                await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", finalWaitingState);
+                await hubContext.Clients.Group(tableId).SendAsync("PromptNextRound");
             }
-
-            if (cashoutTasks.Any()) await Task.WhenAll(cashoutTasks);
-
-            var finalWaitingState = GetOrCreateTable(tableId);
-            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", finalWaitingState);
-            await hubContext.Clients.Group(tableId).SendAsync("PromptNextRound");
         }
-        else
+        catch (Exception ex)
         {
-            var nextTurnState = GetOrCreateTable(tableId);
-            lock (nextTurnState.Players)
-            {
-                nextTurnState.Phase = "betting";
-                nextTurnState.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
-            }
-            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", nextTurnState);
+            Console.WriteLine($"Erro no loop da rodada: {ex.Message}");
         }
     }
+
 
     public TableState GetOrCreateTable(string tableId)
     {
@@ -301,6 +337,10 @@ public class GameManager
 
                     player.ConnectionId = string.Empty;
                     player.LastActiveAt = DateTime.UtcNow;
+
+                    // 👇 LIMPEZA DE EMERGÊNCIA (HOT-RELOAD VITE) 👇
+                    CheckAndResetAbandonedTable(table);
+
                     break;
                 }
             }
@@ -434,6 +474,9 @@ public class GameManager
                 player.LastActiveAt = DateTime.UtcNow;
 
                 wasSeated = true;
+
+                // 👇 LIMPEZA DE EMERGÊNCIA 👇
+                CheckAndResetAbandonedTable(table);
             }
         }
 
@@ -462,6 +505,24 @@ public class GameManager
             {
                 player.LeaveNextHand = willLeave;
                 player.LastActiveAt = DateTime.UtcNow;
+            }
+        }
+    }
+
+    public void ReorderHand(string tableId, string connectionId, List<string> newOrder)
+    {
+        var table = GetOrCreateTable(tableId);
+        lock (table.Players)
+        {
+            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+            if (player != null && player.Status == "playing")
+            {
+                var oldSorted = player.Cards.OrderBy(c => c).ToList();
+                var newSorted = newOrder.OrderBy(c => c).ToList();
+                if (oldSorted.SequenceEqual(newSorted))
+                {
+                    player.Cards = newOrder;
+                }
             }
         }
     }
@@ -507,7 +568,7 @@ public class GameManager
                     p.Status = "playing";
                     p.LastActiveAt = DateTime.UtcNow;
                     p.HasDrawnThisTurn = false;
-                    p.HasFurou = false; // Zera por precaução
+                    p.HasFurou = false;
                 }
 
                 table.ViraCard = deck[0];
@@ -543,8 +604,6 @@ public class GameManager
             if (fromDiscard)
             {
                 if (table.DiscardPile.Count == 0) return false;
-
-                // 👇 BLOQUEIA A COMPRA DO LIXO SE O JOGADOR DEU UMA "FURADA" 👇
                 if (player.HasFurou) return false;
 
                 string drawnCard = table.DiscardPile.Last();
@@ -602,20 +661,22 @@ public class GameManager
 
             seat = player.Seat;
 
+            // Tira da mão e joga no lixo
             player.Cards.Remove(cardToDiscard);
             table.DiscardPile.Add(cardToDiscard);
 
+            // Reseta o status de compra do jogador para a próxima vez dele
             player.HasDrawnThisTurn = false;
             player.LastActiveAt = DateTime.UtcNow;
 
+            // 👇 ISSO É OBRIGATÓRIO AQUI: Passa a vez para o próximo! 👇
             AdvanceTurn(table);
             table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
 
-            return true;
+            return true; // Retorna true indicando que o descarte deu certo
         }
     }
 
-    // 👇 RETORNA UMA STRING PARA DIZER SE "FUROU" 👇
     public string DeclareWin(string tableId, string connectionId, string? cardToDiscard, out int seat, out string playerName, out List<List<string>> winningGroups, out List<string> handCards)
     {
         seat = -1;
@@ -637,31 +698,17 @@ public class GameManager
                 handToValidate.Remove(cardToDiscard);
             }
 
-            if (!ValidateCachetaHand(handToValidate, table.ViraCard, out winningGroups))
+            if (!ValidateCachetaHandPro(handToValidate, table.ViraCard, out winningGroups))
             {
-                // 👇 AQUI ACONTECE A FURADA 👇
                 player.HasFurou = true;
-
-                if (!string.IsNullOrEmpty(cardToDiscard) && player.Cards.Contains(cardToDiscard))
-                {
-                    player.Cards.Remove(cardToDiscard);
-                    table.DiscardPile.Add(cardToDiscard);
-                }
-
                 seat = player.Seat;
                 playerName = player.Name;
-                handCards = new List<string>(player.Cards); // Envia as cartas dele para mostrar
-
-                player.HasDrawnThisTurn = false;
+                handCards = new List<string>(player.Cards);
                 player.LastActiveAt = DateTime.UtcNow;
-
-                AdvanceTurn(table);
-                table.TurnEndTime = DateTime.UtcNow.AddSeconds(TurnDurationSeconds);
 
                 return "Furo";
             }
 
-            // 👇 BATIDA VERDADEIRA 👇
             if (!string.IsNullOrEmpty(cardToDiscard) && player.Cards.Contains(cardToDiscard))
             {
                 player.Cards.Remove(cardToDiscard);
@@ -670,9 +717,12 @@ public class GameManager
 
             seat = player.Seat;
             playerName = player.Name;
-
             player.HasDrawnThisTurn = false;
             player.LastActiveAt = DateTime.UtcNow;
+
+            // 👇 CORREÇÃO: Paga o vencedor! 👇
+            player.Chips += table.Pot;
+            table.Pot = 0;
 
             table.CurrentTurnSeat = -1;
             table.TurnEndTime = null;
@@ -719,191 +769,170 @@ public class GameManager
         };
     }
 
-    private bool ValidateCachetaHand(List<string> hand, string viraCard, out List<List<string>> winningGroups)
+    private bool ValidateCachetaHandPro(List<string> hand, string viraCard, out List<List<string>> winningGroups)
     {
         winningGroups = new List<List<string>>();
         if (hand.Count != 9 && hand.Count != 10) return false;
 
         int viraRank = GetRankValue(viraCard.Substring(0, viraCard.Length - 1));
+        string wildcardSuit = viraCard.Substring(viraCard.Length - 1);
         int wildcardRank = viraRank == 13 ? 1 : viraRank + 1;
 
-        var wildcards = hand.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) == wildcardRank).ToList();
-        var normals = hand.Where(c => GetRankValue(c.Substring(0, c.Length - 1)) != wildcardRank).ToList();
+        var wildcards = new List<string>();
+        var normals = new List<string>();
 
-        var possibleGroups = GenerateAllPossibleGroups(normals, wildcards.Count);
-
-        return FindValidCombination(possibleGroups, normals.Count + wildcards.Count, wildcards.Count, out winningGroups, wildcards);
-    }
-
-    private List<List<string>> GenerateAllPossibleGroups(List<string> normals, int availableWildcards)
-    {
-        var groups = new List<List<string>>();
-        var distinctNormals = normals.Distinct().ToList();
-
-        var groupedByRank = distinctNormals.GroupBy(c => GetRankValue(c.Substring(0, c.Length - 1)));
-        foreach (var group in groupedByRank)
+        foreach (var c in hand)
         {
-            var cardsOfRank = group.ToList();
-            int maxPossibleWithWildcards = cardsOfRank.Count + availableWildcards;
-
-            if (maxPossibleWithWildcards >= 3)
-            {
-                for (int size = 3; size <= Math.Min(4, maxPossibleWithWildcards); size++)
-                {
-                    var combinations = GetCombinations(cardsOfRank, Math.Min(cardsOfRank.Count, size));
-                    foreach (var combo in combinations)
-                    {
-                        if (combo.Count <= size && combo.Count + availableWildcards >= size)
-                        {
-                            groups.Add(combo);
-                        }
-                    }
-                }
-            }
+            int r = GetRankValue(c.Substring(0, c.Length - 1));
+            string s = c.Substring(c.Length - 1);
+            if (r == wildcardRank && s == wildcardSuit) wildcards.Add(c);
+            else normals.Add(c);
         }
 
-        var groupedBySuit = distinctNormals.GroupBy(c => c.Last());
-        foreach (var group in groupedBySuit)
-        {
-            var cardsOfSuit = group.OrderBy(c => GetRankValue(c.Substring(0, c.Length - 1))).ToList();
-
-            var hasAce = cardsOfSuit.Any(c => GetRankValue(c.Substring(0, c.Length - 1)) == 1);
-            var extendedCards = new List<string>(cardsOfSuit);
-            if (hasAce)
-            {
-                var aceCard = cardsOfSuit.First(c => GetRankValue(c.Substring(0, c.Length - 1)) == 1);
-                extendedCards.Add(aceCard);
-            }
-
-            for (int i = 0; i < extendedCards.Count; i++)
-            {
-                for (int size = 3; size <= 4; size++)
-                {
-                    var sequenceCards = new List<string>();
-                    int wildcardsNeeded = 0;
-                    int currentRank = GetRankValue(extendedCards[i].Substring(0, extendedCards[i].Length - 1));
-
-                    if (i == extendedCards.Count - 1 && GetRankValue(extendedCards[i].Substring(0, extendedCards[i].Length - 1)) == 1)
-                        currentRank = 14;
-
-                    bool validSequence = true;
-
-                    for (int j = 0; j < size; j++)
-                    {
-                        int targetRank = currentRank + j;
-                        string targetRankStr = targetRank == 14 ? "A" : targetRank.ToString();
-                        if (targetRank == 11) targetRankStr = "J";
-                        if (targetRank == 12) targetRankStr = "Q";
-                        if (targetRank == 13) targetRankStr = "K";
-
-                        var nextCard = extendedCards.FirstOrDefault(c =>
-                            (GetRankValue(c.Substring(0, c.Length - 1)) == targetRank || (targetRank == 14 && GetRankValue(c.Substring(0, c.Length - 1)) == 1))
-                            && c.Last() == group.Key);
-
-                        if (nextCard != null && !sequenceCards.Contains(nextCard))
-                        {
-                            sequenceCards.Add(nextCard);
-                        }
-                        else
-                        {
-                            wildcardsNeeded++;
-                        }
-                    }
-
-                    if (wildcardsNeeded <= availableWildcards && sequenceCards.Count > 0)
-                    {
-                        groups.Add(sequenceCards);
-                    }
-                }
-            }
-        }
-
-        return groups.Distinct(new ListComparer()).ToList();
+        return RecursiveSolve(normals, wildcards.Count, 0, new List<List<string>>(), out winningGroups, wildcards);
     }
 
-    private bool FindValidCombination(List<List<string>> possibleGroups, int totalCards, int totalWildcards, out List<List<string>> winningGroups, List<string> actualWildcards)
+    private bool RecursiveSolve(List<string> remainingCards, int remainingWildcards, int groupsFormed, List<List<string>> currentGroups, out List<List<string>> finalGroups, List<string> actualWildcards)
     {
-        winningGroups = new List<List<string>>();
-        int targetGroupsCount = totalCards == 9 ? 3 : 3;
+        finalGroups = new List<List<string>>();
 
-        var combinations = GetCombinations(possibleGroups, targetGroupsCount);
-
-        foreach (var combo in combinations)
+        if (groupsFormed == 3)
         {
-            var usedCards = new HashSet<string>();
-            int wildcardsNeeded = 0;
-            bool isValid = true;
-
-            foreach (var group in combo)
+            if (remainingCards.Count == 0)
             {
-                foreach (var card in group)
+                int wildIndex = 0;
+                var solved = new List<List<string>>();
+
+                foreach (var g in currentGroups)
                 {
-                    if (!usedCards.Add(card))
+                    var sg = new List<string>(g);
+                    while (sg.Count < 3 && wildIndex < actualWildcards.Count)
                     {
-                        isValid = false;
-                        break;
+                        sg.Add(actualWildcards[wildIndex]);
+                        wildIndex++;
                     }
+                    solved.Add(sg);
                 }
-                if (!isValid) break;
 
-                int expectedSize = Math.Max(3, group.Count);
-                if (group.Count < 3) expectedSize = 3;
-
-                wildcardsNeeded += (expectedSize - group.Count);
-            }
-
-            if (isValid && wildcardsNeeded == totalWildcards && usedCards.Count + wildcardsNeeded == totalCards)
-            {
-                winningGroups = new List<List<string>>();
-                int wildcardIndex = 0;
-                foreach (var group in combo)
+                while (wildIndex < actualWildcards.Count && solved.Count > 0)
                 {
-                    var finalGroup = new List<string>(group);
-                    int expectedSize = Math.Max(3, group.Count);
-                    while (finalGroup.Count < expectedSize && wildcardIndex < actualWildcards.Count)
-                    {
-                        finalGroup.Add(actualWildcards[wildcardIndex]);
-                        wildcardIndex++;
-                    }
-                    winningGroups.Add(finalGroup);
+                    solved[0].Add(actualWildcards[wildIndex]);
+                    wildIndex++;
                 }
+
+                finalGroups = solved;
                 return true;
             }
+            return false;
         }
+
+        var possibleSets = ExtractValidSets(remainingCards, remainingWildcards);
+
+        foreach (var setDef in possibleSets)
+        {
+            var nextRemaining = new List<string>(remainingCards);
+            foreach (var c in setDef.CardsUsed) nextRemaining.Remove(c);
+
+            var nextGroups = new List<List<string>>(currentGroups) { setDef.CardsUsed };
+            int nextWilds = remainingWildcards - setDef.WildcardsNeeded;
+
+            if (nextWilds >= 0)
+            {
+                if (RecursiveSolve(nextRemaining, nextWilds, groupsFormed + 1, nextGroups, out finalGroups, actualWildcards))
+                {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
-    private List<List<T>> GetCombinations<T>(List<T> list, int length)
+    private class SetDefinition
     {
-        if (length == 1) return list.Select(t => new List<T> { t }).ToList();
-        var result = new List<List<T>>();
-        for (int i = 0; i < list.Count; i++)
-        {
-            var head = list[i];
-            var tail = list.Skip(i + 1).ToList();
-            foreach (var combination in GetCombinations(tail, length - 1))
-            {
-                combination.Insert(0, head);
-                result.Add(combination);
-            }
-        }
-        return result;
+        public List<string> CardsUsed { get; set; } = new();
+        public int WildcardsNeeded { get; set; }
     }
 
-    private class ListComparer : IEqualityComparer<List<string>>
+    private List<SetDefinition> ExtractValidSets(List<string> cards, int maxWildcards)
     {
-        public bool Equals(List<string>? x, List<string>? y)
+        var validSets = new List<SetDefinition>();
+        if (cards.Count == 0) return validSets;
+
+        var suits = new[] { "♥", "♦", "♣", "♠" };
+
+        foreach (var suit in suits)
         {
-            if (x == null || y == null) return x == y;
-            if (x.Count != y.Count) return false;
-            return x.OrderBy(c => c).SequenceEqual(y.OrderBy(c => c));
+            var suitCards = cards.Where(c => c.EndsWith(suit)).OrderBy(c => GetRankValue(c.Substring(0, c.Length - 1))).ToList();
+            if (suitCards.Count == 0) continue;
+
+            var expanded = new List<string>(suitCards);
+            if (suitCards.Any(c => GetRankValue(c.Substring(0, c.Length - 1)) == 1))
+            {
+                expanded.Add(suitCards.First(c => GetRankValue(c.Substring(0, c.Length - 1)) == 1));
+            }
+
+            for (int i = 0; i < expanded.Count; i++)
+            {
+                for (int len = 3; len <= 4; len++)
+                {
+                    var used = new List<string>();
+                    int wildsNeeded = 0;
+                    int startRank = GetRankValue(expanded[i].Substring(0, expanded[i].Length - 1));
+                    if (i >= suitCards.Count) startRank = 14;
+
+                    for (int j = 0; j < len; j++)
+                    {
+                        int tRank = startRank + j;
+                        var targetCard = expanded.FirstOrDefault(c =>
+                        {
+                            int r = GetRankValue(c.Substring(0, c.Length - 1));
+                            if (tRank == 14 && r == 1) return true;
+                            return r == tRank;
+                        });
+
+                        if (targetCard != null && !used.Contains(targetCard)) used.Add(targetCard);
+                        else wildsNeeded++;
+                    }
+
+                    if (used.Count > 0 && wildsNeeded <= maxWildcards)
+                    {
+                        if (!validSets.Any(s => s.CardsUsed.SequenceEqual(used) && s.WildcardsNeeded == wildsNeeded))
+                        {
+                            validSets.Add(new SetDefinition { CardsUsed = used, WildcardsNeeded = wildsNeeded });
+                        }
+                    }
+                }
+            }
         }
 
-        public int GetHashCode(List<string> obj)
+        var groupedByRank = cards.GroupBy(c => GetRankValue(c.Substring(0, c.Length - 1)));
+        foreach (var group in groupedByRank)
         {
-            int hash = 19;
-            foreach (var item in obj.OrderBy(c => c)) hash = hash * 31 + item.GetHashCode();
-            return hash;
+            var uniqueSuitCards = group.GroupBy(c => c.Substring(c.Length - 1)).Select(g => g.First()).ToList();
+
+            for (int len = 3; len <= 4; len++)
+            {
+                if (uniqueSuitCards.Count + maxWildcards >= len && uniqueSuitCards.Count > 0)
+                {
+                    int wNeeded = Math.Max(0, len - uniqueSuitCards.Count);
+                    if (wNeeded <= maxWildcards)
+                    {
+                        var used = uniqueSuitCards.Take(len - wNeeded).ToList();
+                        if (!validSets.Any(s => s.CardsUsed.SequenceEqual(used) && s.WildcardsNeeded == wNeeded))
+                        {
+                            validSets.Add(new SetDefinition { CardsUsed = used, WildcardsNeeded = wNeeded });
+                        }
+                    }
+                }
+            }
         }
+
+        if (cards.Count > 0 && cards.Count + maxWildcards >= 3)
+        {
+            validSets.Add(new SetDefinition { CardsUsed = new List<string> { cards[0] }, WildcardsNeeded = 2 });
+        }
+
+        return validSets.OrderBy(s => s.WildcardsNeeded).ThenByDescending(s => s.CardsUsed.Count).ToList();
     }
 }

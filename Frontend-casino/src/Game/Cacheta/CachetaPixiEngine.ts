@@ -3,6 +3,7 @@ import { Deck } from '../Deck';
 import { PlayerSeat } from './PlayerSeat';
 import { Animator } from '../Animator';
 import { CachetaSorter } from './CachetaSorter';
+import { gsap } from 'gsap'; 
 
 export interface CachetaEngineCallbacks {
     setDealing: (val: boolean) => void;
@@ -10,6 +11,9 @@ export interface CachetaEngineCallbacks {
     flushPendingState: () => void;
     sitDown: (seatIndex: number) => void;
     onCardSelected: (cardStr: string | null) => void; 
+    onHandReordered?: (newOrder: string[]) => void; 
+    onDrawCard?: (fromDiscard: boolean) => void;
+    onDiscardCard?: (cardStr: string) => void;
 }
 
 export class CachetaPixiEngine {
@@ -20,17 +24,22 @@ export class CachetaPixiEngine {
     private avatarTextureCache: Map<string, PIXI.Texture> = new Map();
 
     public backgroundLayer = new PIXI.Container();
+    public baseDeckLayer = new PIXI.Container(); 
     public mainLayer = new PIXI.Container();
     public cardLayer = new PIXI.Container(); 
     public particleLayer = new PIXI.Container();
 
-    public readonly MONTE_X = 190;
-    public readonly MONTE_Y = 420;
-    public readonly LIXO_X = 270;
-    public readonly LIXO_Y = 420;
-    public readonly VIRA_X = 190 - 45; 
-    public readonly VIRA_Y = 420;
-    public readonly CENTER_CARDS_SCALE = 1.45; 
+    public monteBtnOverlay = new PIXI.Graphics();
+    public lixoBtnOverlay = new PIXI.Graphics();
+
+    public readonly VIRA_X = 165;  
+    public readonly MONTE_X = 215; 
+    public readonly LIXO_X = 275;  
+    
+    public readonly VIRA_Y = 370;
+    public readonly MONTE_Y = 370;
+    public readonly LIXO_Y = 370;
+    public readonly CENTER_CARDS_SCALE = 1.25; 
 
     public cardTargets: { x: number, y: number, seat: number }[] = [];
     public dealtCardsUI: PIXI.Container[] = [];
@@ -39,7 +48,10 @@ export class CachetaPixiEngine {
     public activeFireParticles: { mesh: PIXI.Graphics; life: number; vx: number; vy: number; }[] = [];
 
     public heroCardData: { str: string, sprite: PIXI.Container }[] = [];
+    
+    // 👇 CONTROLE CORRIGIDO PARA IDENTIFICAR A CARTA EXATA CLICADA (MEMÓRIA) 👇
     public selectedCardStr: string | null = null;
+    public selectedCardContainer: PIXI.Container | null = null;
 
     public viraCardUI: PIXI.Container | null = null;
     public lixoCardsUI: PIXI.Container[] = [];
@@ -50,12 +62,28 @@ export class CachetaPixiEngine {
     public activeTimerSeat = -1;
     public turnEndTime = 0;
     public readonly TIMER_DURATION_SEC = 60;
-
     public readonly MAGIC_COLORS = [0x00f3ff, 0xa855f7, 0xff6bfb, 0xffffff];
 
     private isDealingCardsAnimationRunning: boolean = false;
     private lastPhaseTracker: string = 'waiting';
     private sortMode: number = 0; 
+    public currentHeroScale: number = 1; 
+
+    private draggingCardSprite: PIXI.Container | null = null;
+    private dragInitialVisualX: number = 0;
+    private dragInitialPointerX: number = 0;
+    private dragInitialPointerY: number = 0;
+    private draggingLogicalIndex: number = -1;
+    private dragHasMoved: boolean = false; 
+    private dragSlotsX: number[] = []; 
+
+    private warningCardSprite: PIXI.Container | null = null;
+    private warningTime: number = 0;
+    private hasFiredTimeout: boolean = false; // Controle de timeout fallback
+
+    private previousHeroCards: string[] = [];
+    private previousDiscardPile: string[] = [];
+    private lastTurnSeat: number = -1;
 
     constructor(
         public gameState: any, 
@@ -81,6 +109,7 @@ export class CachetaPixiEngine {
         this.app.stage.hitArea = new PIXI.Rectangle(0, 0, width, height);
 
         this.app.stage.addChild(this.backgroundLayer); 
+        this.app.stage.addChild(this.baseDeckLayer); 
         this.app.stage.addChild(this.mainLayer);
         this.app.stage.addChild(this.cardLayer); 
         this.app.stage.addChild(this.particleLayer); 
@@ -120,7 +149,6 @@ export class CachetaPixiEngine {
         
         const blurFilter = new PIXI.BlurFilter();
         blurFilter.strength = 60; 
-        
         neonGlow.filters = [blurFilter];
         neonGlow.x = tableSprite.x;
         neonGlow.y = tableSprite.y;
@@ -143,10 +171,37 @@ export class CachetaPixiEngine {
         this.buildSeats(this.gameState.maxPlayers);
 
         this.deckInstance = new Deck(this.MONTE_X, this.MONTE_Y, deckTexture, true); 
-        this.mainLayer.addChild(this.deckInstance.view);
+        this.deckInstance.view.eventMode = 'none'; 
+        this.baseDeckLayer.addChild(this.deckInstance.view);
+        
+        this.monteBtnOverlay.circle(0, 0, 45);
+        this.monteBtnOverlay.fill({ color: 0x000000, alpha: 0.01 }); 
+        this.monteBtnOverlay.x = this.MONTE_X;
+        this.monteBtnOverlay.y = this.MONTE_Y;
+        this.monteBtnOverlay.eventMode = 'static';
+        this.monteBtnOverlay.cursor = 'pointer';
+        this.monteBtnOverlay.on('pointerdown', (e) => {
+            e.stopPropagation();
+            if (this.callbacks.onDrawCard) this.callbacks.onDrawCard(false); 
+        });
+        this.mainLayer.addChild(this.monteBtnOverlay);
+
+        this.lixoBtnOverlay.circle(0, 0, 45);
+        this.lixoBtnOverlay.fill({ color: 0x000000, alpha: 0.01 }); 
+        this.lixoBtnOverlay.x = this.LIXO_X;
+        this.lixoBtnOverlay.y = this.LIXO_Y;
+        this.lixoBtnOverlay.eventMode = 'static';
+        this.lixoBtnOverlay.cursor = 'pointer';
+        this.lixoBtnOverlay.on('pointerdown', (e) => {
+            e.stopPropagation();
+            if (this.callbacks.onDrawCard) this.callbacks.onDrawCard(true);
+        });
+        this.mainLayer.addChild(this.lixoBtnOverlay);
         
         this.updateDeckVisibility();
         this.updateAllBalances();
+
+        this.setupGlobalDragListeners();
     }
     
     private getAvatarTexture(url?: string): PIXI.Texture {
@@ -227,6 +282,8 @@ export class CachetaPixiEngine {
         if (this.deckInstance && this.gameState && this.gameState.players) {
             const seatedCount = this.gameState.players.filter((p: any) => p.isSeated).length;
             this.deckInstance.view.visible = seatedCount > 1;
+            this.monteBtnOverlay.visible = seatedCount > 1;
+            this.lixoBtnOverlay.visible = seatedCount > 1;
         }
     }
 
@@ -266,6 +323,14 @@ export class CachetaPixiEngine {
 
     public clearDealtCards() {
         this.isDealingCardsAnimationRunning = false; 
+        this.resetWarningCard(); 
+        this.previousHeroCards = [];
+        this.previousDiscardPile = [];
+        this.lastTurnSeat = -1;
+
+        // Limpa seleção
+        this.selectedCardContainer = null;
+        this.selectedCardStr = null;
 
         const allCards = [...this.cardLayer.children];
         allCards.forEach(card => {
@@ -281,7 +346,7 @@ export class CachetaPixiEngine {
         this.clearFurouCards(); 
 
         this.heroCardData = []; 
-        this.selectedCardStr = null;
+
         this.viraCardUI = null;
         this.sortBtnUI = null;
 
@@ -329,6 +394,7 @@ export class CachetaPixiEngine {
     public startTimer(seatIndex: number, timeLeftSeconds: number) {
         this.stopTimer(); 
         this.activeTimerSeat = seatIndex;
+        this.hasFiredTimeout = false; 
         const safeTime = Math.min(timeLeftSeconds || this.TIMER_DURATION_SEC, this.TIMER_DURATION_SEC);
         this.turnEndTime = Date.now() + (safeTime * 1000);
         if (this.playerSeats[seatIndex]) this.playerSeats[seatIndex].startTimer();
@@ -340,7 +406,7 @@ export class CachetaPixiEngine {
     }
 
     private drawSortButton(x: number, y: number) {
-        if (this.sortBtnUI) {
+        if (this.sortBtnUI && !this.sortBtnUI.destroyed) {
             this.sortBtnUI.x = x;
             this.sortBtnUI.y = y;
             this.updateSortButtonIcon();
@@ -349,13 +415,13 @@ export class CachetaPixiEngine {
         
         this.sortBtnUI = new PIXI.Container();
         const bg = new PIXI.Graphics();
-        bg.circle(0, 0, 18);
+        bg.circle(0, 0, 22); 
         bg.fill({ color: 0x1a2639, alpha: 0.95 });
         bg.stroke({ width: 2, color: 0x00f3ff, alpha: 0.8 });
         
         const icon = new PIXI.Text({
             text: '⚡', 
-            style: { fontSize: 16, fill: 0xffffff, align: 'center' }
+            style: { fontSize: 18, fill: 0xffffff, align: 'center' }
         } as any);
         icon.anchor.set(0.5);
         
@@ -363,14 +429,23 @@ export class CachetaPixiEngine {
         this.sortBtnUI.addChild(icon);
         this.sortBtnUI.x = x;
         this.sortBtnUI.y = y;
+        
         this.sortBtnUI.eventMode = 'static';
         this.sortBtnUI.cursor = 'pointer';
+        this.sortBtnUI.hitArea = new PIXI.Circle(0, 0, 50); 
         
-        this.sortBtnUI.on('pointerdown', () => {
+        this.sortBtnUI.on('pointerdown', (e) => {
+            e.stopPropagation(); 
             this.sortBtnUI!.scale.set(0.85);
-            setTimeout(() => { if(this.sortBtnUI) this.sortBtnUI.scale.set(1.0); }, 100);
+            setTimeout(() => { if(this.sortBtnUI && !this.sortBtnUI.destroyed) this.sortBtnUI.scale.set(1.0); }, 100);
             
-            this.sortMode = (this.sortMode + 1) % 3; 
+            if (this.sortMode === 0) this.sortMode = 1;
+            else this.sortMode = this.sortMode === 1 ? 2 : 1;
+            
+            this.selectedCardContainer = null;
+            this.selectedCardStr = null;
+            if (this.callbacks.onCardSelected) this.callbacks.onCardSelected(null);
+
             this.updateSortButtonIcon();
             this.sortHeroHand();
         });
@@ -384,18 +459,124 @@ export class CachetaPixiEngine {
         const iconNode = this.sortBtnUI.children[1] as PIXI.Text;
         if (!iconNode) return;
 
-        if (this.sortMode === 0) iconNode.text = 'O';
-        else if (this.sortMode === 1) iconNode.text = '⚡';
+        if (this.sortMode === 0 || this.sortMode === 1) iconNode.text = '⚡';
         else if (this.sortMode === 2) iconNode.text = '🌊';
     }
 
     private getHeroLayout(totalCards: number) {
         const screenWidth = this.app ? this.app.screen.width : window.innerWidth;
-        const availableWidth = screenWidth * 0.90; 
-        const scale = screenWidth < 600 ? 1.6 : 1.9; 
-        const maxSpread = screenWidth < 600 ? 40 : 50; 
-        const spreadFactor = Math.min(availableWidth / Math.max(1, totalCards), maxSpread);
-        return { spreadFactor, scale };
+        const availableWidth = screenWidth * 0.96; 
+        
+        const scale = screenWidth < 600 ? 1.5 : 1.75; 
+        this.currentHeroScale = scale; 
+        
+        return { scale, availableWidth };
+    }
+
+    private calculateHeroXPositions(cards: string[], scale: number, availableWidth: number, sortMode: number, viraCard: string): number[] {
+        const positions: number[] = [];
+        if (cards.length === 0) return positions;
+
+        const baseCardWidth = 70 * scale;
+        let normalStep = 23 * scale; 
+        let gapExtra = 16 * scale; 
+
+        const gaps: boolean[] = [false]; 
+        
+        if (sortMode === 0) {
+            for (let i = 1; i < cards.length; i++) gaps.push(false);
+        } else {
+            let wRankVal = -1;
+            let wSuit = '';
+            if (viraCard) {
+                wSuit = viraCard.slice(-1);
+                const vRank = viraCard.slice(0, -1);
+                const vVal = CachetaSorter.rankOrder[vRank] || 0;
+                wRankVal = vVal === 13 ? 1 : vVal + 1;
+            }
+
+            const isWildcard = (c: string) => {
+                if (!viraCard) return false;
+                const r = c.slice(0, -1);
+                const s = c.slice(-1);
+                return (CachetaSorter.rankOrder[r] === wRankVal && s === wSuit);
+            };
+
+            const runs: { startIndex: number, length: number, isWildcard: boolean, type: string }[] = [];
+            let currentRunStart = 0;
+
+            for (let i = 1; i <= cards.length; i++) {
+                let isGrouped = false;
+                if (i < cards.length) {
+                    const prev = cards[i - 1];
+                    const curr = cards[i];
+                    const pRank = prev.slice(0, -1);
+                    const pSuit = prev.slice(-1);
+                    const cRank = curr.slice(0, -1);
+                    const cSuit = curr.slice(-1);
+
+                    if (sortMode === 1) {
+                        if (pRank === cRank) isGrouped = true;
+                    } else if (sortMode === 2) {
+                        if (pSuit === cSuit) {
+                            const r1 = CachetaSorter.rankOrder[pRank] || 0;
+                            const r2 = CachetaSorter.rankOrder[cRank] || 0;
+                            if (r2 === r1 + 1 || r2 === r1) isGrouped = true;
+                        }
+                        if (pRank === cRank) isGrouped = true; 
+                    }
+                }
+
+                if (!isGrouped || i === cards.length) {
+                    const length = i - currentRunStart;
+                    const wild = isWildcard(cards[currentRunStart]);
+                    const type = (wild || length >= 3) ? 'VALID' : 'LIXO';
+                    
+                    runs.push({
+                        startIndex: currentRunStart,
+                        length: length,
+                        isWildcard: wild,
+                        type: type
+                    });
+                    currentRunStart = i;
+                }
+            }
+
+            for (let i = 1; i < cards.length; i++) {
+                const runIdx = runs.findIndex(r => r.startIndex === i);
+                if (runIdx !== -1) {
+                    const currentRun = runs[runIdx];
+                    const prevRun = runs[runIdx - 1];
+                    
+                    if (prevRun && prevRun.type === 'LIXO' && currentRun.type === 'LIXO') {
+                        gaps.push(false); 
+                    } else {
+                        gaps.push(true); 
+                    }
+                } else {
+                    gaps.push(false);
+                }
+            }
+        }
+
+        const totalGaps = gaps.filter(g => g).length;
+        const totalSteps = cards.length - 1;
+
+        const expectedTotalWidth = baseCardWidth + (totalSteps * normalStep) + (totalGaps * gapExtra);
+        if (expectedTotalWidth > availableWidth) {
+            const reductionRatio = availableWidth / expectedTotalWidth;
+            normalStep *= reductionRatio;
+            gapExtra *= reductionRatio;
+        }
+
+        let currentX = 0;
+        for (let i = 0; i < cards.length; i++) {
+            if (gaps[i]) currentX += gapExtra;
+            positions.push(currentX);
+            if (i < cards.length - 1) currentX += normalStep;
+        }
+
+        return positions;
     }
 
     public sortHeroHand() {
@@ -411,15 +592,21 @@ export class CachetaPixiEngine {
             sortedArray = [...hero.serverCards]; 
         }
 
-        const spreadFactor = 32; 
         const totalCards = sortedArray.length;
-        const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
+        const layout = this.getHeroLayout(totalCards);
+        
+        const positions = this.calculateHeroXPositions(sortedArray, layout.scale, layout.availableWidth, this.sortMode, this.gameState.viraCard);
+        const totalW = positions.length > 0 ? positions[positions.length - 1] : 0;
+        const startOffset = -totalW / 2;
+
         const target = this.cardTargets.find(c => c.seat === hero.seat);
         if (!target) return;
 
+        const targetY = (this.seatCoords[0]?.y || 0) - 115;
+
         const newHeroCardData: any[] = [];
         const availableSprites = [...this.heroCardData]; 
-        
+
         sortedArray.forEach((cardStr: string, index: number) => {
             const spriteIndex = availableSprites.findIndex(c => c.str === cardStr);
             if (spriteIndex !== -1) {
@@ -427,16 +614,30 @@ export class CachetaPixiEngine {
                 availableSprites.splice(spriteIndex, 1); 
 
                 newHeroCardData.push(cardData);
-                const finalX = target.x + startOffset + (index * spreadFactor);
-                this.performAnimation(cardData.sprite, finalX, cardData.sprite.y, 15);
+                const finalX = target.x + startOffset + positions[index];
+                
+                // 👇 COMPARAÇÃO DIRETA PELO CONTAINER (Identifica duplicatas corretamente) 👇
+                const isSelected = (this.selectedCardContainer === cardData.sprite);
+                const finalY = isSelected ? targetY - 25 : targetY;
+
+                gsap.to(cardData.sprite, { x: finalX, y: finalY, duration: 0.4, ease: "power2.out" });
             }
         });
         
         this.heroCardData = newHeroCardData;
         
-        this.heroCardData.forEach(c => {
-            this.cardLayer.setChildIndex(c.sprite, this.cardLayer.children.length - 1);
+        if (hero && hero.serverCards) {
+            hero.serverCards = this.heroCardData.map(c => c.str);
+            if (this.callbacks.onHandReordered) {
+                this.callbacks.onHandReordered(hero.serverCards);
+            }
+        }
+
+        this.heroCardData.forEach((c) => {
+            this.cardLayer.addChild(c.sprite);
         });
+
+        this.setupAllDragEvents();
     }
 
     public syncBoard() {
@@ -470,9 +671,40 @@ export class CachetaPixiEngine {
         this.lastPhaseTracker = this.gameState.phase;
 
         if (this.isDealingCardsAnimationRunning) return;
+        
+        // 👇 CORREÇÃO: Força a atualização se o tempo acabar enquanto estiver arrastando 👇
+        if (this.draggingCardSprite) {
+            const hero = this.gameState.players.find((p: any) => p.isHero);
+            
+            // Se o servidor passou a vez (não é mais o nosso turno), aborta o arrasto!
+            if (this.gameState.currentTurnSeat !== hero?.seat) {
+                this.draggingCardSprite = null;
+                this.draggingLogicalIndex = -1;
+            } else {
+                return; // Se ainda é nossa vez, continua ignorando para o arrasto ser fluído
+            }
+        }
 
-        this.clearDealtCards();
+        const allCards = [...this.cardLayer.children];
 
+
+        allCards.forEach(card => {
+            this.safeDestroy(card as PIXI.Container);
+        });
+        
+        this.selectedCardContainer = null;
+        this.selectedCardStr = null;
+        
+        this.heroCardData = []; 
+        this.lixoCardsUI = [];
+        
+        if (this.viraCardUI && this.viraCardUI.parent) this.safeDestroy(this.viraCardUI);
+        this.viraCardUI = null;
+        this.sortBtnUI = null;
+
+        const hero = this.gameState.players.find((p: any) => p.isHero);
+        const currentDiscardPile = this.gameState.discardPile || [];
+        
         if (this.gameState.viraCard) {
             const rank = this.gameState.viraCard.slice(0, -1) || "A";
             const suit = this.gameState.viraCard.slice(-1) || "♠";
@@ -481,28 +713,53 @@ export class CachetaPixiEngine {
             this.viraCardUI.x = this.VIRA_X;
             this.viraCardUI.y = this.VIRA_Y;
             this.viraCardUI.rotation = Math.PI / -2; 
+            this.viraCardUI.eventMode = 'none';
 
-            const deckIndex = this.mainLayer.getChildIndex(this.deckInstance.view);
-            this.mainLayer.addChildAt(this.viraCardUI, Math.max(0, deckIndex));
+            this.baseDeckLayer.addChildAt(this.viraCardUI, 0);
         }
 
-        if (this.gameState.discardPile && this.gameState.discardPile.length > 0) {
-            const pile = this.gameState.discardPile;
-            const maxShow = Math.min(3, pile.length);
+        const maxShow = Math.min(3, currentDiscardPile.length);
+        for (let i = maxShow - 1; i >= 0; i--) {
+            const cardStr = currentDiscardPile[currentDiscardPile.length - 1 - i];
+            const rank = cardStr.slice(0, -1) || "A";
+            const suit = cardStr.slice(-1) || "♠";
+            const lixoCard = this.deckInstance.createCardToDeal(true, rank, suit);
             
-            for (let i = maxShow - 1; i >= 0; i--) {
-                const cardStr = pile[pile.length - 1 - i];
-                const rank = cardStr.slice(0, -1) || "A";
-                const suit = cardStr.slice(-1) || "♠";
-                const lixoCard = this.deckInstance.createCardToDeal(true, rank, suit);
-                
-                lixoCard.scale.set(this.CENTER_CARDS_SCALE); 
+            lixoCard.scale.set(this.CENTER_CARDS_SCALE); 
+            lixoCard.eventMode = 'none'; 
+
+            const isNewDiscard = i === 0 && !this.previousDiscardPile.includes(cardStr) && this.previousDiscardPile.length > 0;
+            const wasHeroTimeout = this.lastTurnSeat === hero?.seat && this.gameState.currentTurnSeat !== hero?.seat;
+
+            if (isNewDiscard && this.lastPhaseTracker !== 'dealing') {
+                if (wasHeroTimeout) {
+                    lixoCard.x = this.MONTE_X;
+                    lixoCard.y = this.MONTE_Y;
+                    const heroFrontX = (this.seatCoords[0]?.x || 0);
+                    const heroFrontY = (this.seatCoords[0]?.y || 0) - 80;
+                    
+                    const tl = gsap.timeline();
+                    tl.to(lixoCard, { x: heroFrontX, y: heroFrontY, duration: 0.25, ease: "power2.out" })
+                      .to(lixoCard, { y: heroFrontY - 35, duration: 0.15, ease: "power1.inOut" })
+                      .to(lixoCard, { x: this.LIXO_X, y: this.LIXO_Y, duration: 0.25, ease: "power2.in" });
+                } else {
+                    const sourceSeat = this.cardTargets.find(c => c.seat === this.lastTurnSeat);
+                    if (sourceSeat) {
+                        lixoCard.x = sourceSeat.x;
+                        lixoCard.y = sourceSeat.y;
+                        gsap.to(lixoCard, { x: this.LIXO_X, y: this.LIXO_Y, duration: 0.3, ease: "power2.out" });
+                    } else {
+                        lixoCard.x = this.LIXO_X; 
+                        lixoCard.y = this.LIXO_Y;
+                    }
+                }
+            } else {
                 lixoCard.x = this.LIXO_X; 
                 lixoCard.y = this.LIXO_Y; 
-                
-                this.cardLayer.addChild(lixoCard);
-                this.lixoCardsUI.push(lixoCard);
             }
+            
+            this.cardLayer.addChild(lixoCard);
+            this.lixoCardsUI.push(lixoCard);
         }
 
         for (let i = 0; i < this.gameState.maxPlayers; i++) {
@@ -519,6 +776,13 @@ export class CachetaPixiEngine {
                 }
 
                 let cardsToRender = player.serverCards ? [...player.serverCards] : [];
+                
+                const isDrawing = (cardsToRender.length > this.previousHeroCards.length) && this.previousHeroCards.length > 0 && this.lastPhaseTracker !== 'dealing';
+                if (isDrawing && this.sortMode !== 0) {
+                    this.sortMode = 0;
+                    this.updateSortButtonIcon();
+                }
+
                 if (this.sortMode === 1 && cardsToRender.length > 0) {
                     cardsToRender = CachetaSorter.getSortedCards(cardsToRender, this.gameState.viraCard);
                 } else if (this.sortMode === 2 && cardsToRender.length > 0) {
@@ -526,13 +790,12 @@ export class CachetaPixiEngine {
                 }
 
                 const totalCards = cardsToRender.length > 0 ? cardsToRender.length : 9;
-                
                 const layout = this.getHeroLayout(totalCards);
-                const finalScale = layout.scale;
-                const spreadFactor = layout.spreadFactor; 
-                const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
+                const positions = this.calculateHeroXPositions(cardsToRender, layout.scale, layout.availableWidth, this.sortMode, this.gameState.viraCard);
+                const totalW = positions.length > 0 ? positions[positions.length - 1] : 0;
+                const startOffset = -totalW / 2;
                 
-                const targetY = this.seatCoords[0].y - 112;
+                const targetY = (this.seatCoords[0]?.y || 0) - 115;
 
                 for (let c = 0; c < totalCards; c++) {
                     const cardStr = cardsToRender.length > 0 ? cardsToRender[c] : "A♠";
@@ -540,41 +803,220 @@ export class CachetaPixiEngine {
                     const suit = cardStr ? (cardStr.slice(-1) || "♠") : "♠";
 
                     const cardSprite = this.deckInstance.createCardToDeal(true, rank, suit);
-                    cardSprite.scale.set(finalScale);
+                    
+                    const finalX = target.x + startOffset + (positions[c] || 0);
+                    const finalY = targetY;
 
-                    cardSprite.x = target.x + startOffset + (c * spreadFactor);
-                    cardSprite.y = targetY;
 
-                    cardSprite.eventMode = 'static';
-                    cardSprite.cursor = 'pointer';
-                    cardSprite.on('pointerdown', () => this.onHeroCardClicked(cardStr, cardSprite));
-                    if (this.selectedCardStr === cardStr) cardSprite.y -= 25;
+                    const isNewCard = isDrawing && (c === cardsToRender.length - 1);
+
+if (isNewCard) {
+    const cameFromLixo = this.previousDiscardPile.includes(cardStr);
+    cardSprite.x = cameFromLixo ? this.LIXO_X : this.MONTE_X;
+    cardSprite.y = cameFromLixo ? this.LIXO_Y : this.MONTE_Y;
+    cardSprite.scale.set(this.CENTER_CARDS_SCALE);
+    
+    // 👇 Seleciona automaticamente a carta recém comprada 👇
+    this.selectedCardContainer = cardSprite;
+    this.selectedCardStr = cardStr;
+    
+    // Notifica o Vue que esta carta já está selecionada (libera o botão de descarte)
+    if (this.callbacks.onCardSelected) {
+        this.callbacks.onCardSelected(this.selectedCardStr);
+    }
+    
+    // Calcula a posição Y levantada (-25 pixels)
+    const liftedY = targetY - 25;
+    
+    const tl = gsap.timeline();
+    tl.to(cardSprite, { x: finalX, y: targetY + 60, scale: layout.scale * 1.1, duration: 0.25, ease: "power2.out" })
+      .to(cardSprite, { y: liftedY, scale: layout.scale, duration: 0.2, ease: "back.out(1.2)" });
+      
+} else {
+    cardSprite.scale.set(layout.scale);
+    cardSprite.x = finalX;
+    cardSprite.y = finalY;
+}
+
+
                     this.heroCardData.push({ str: cardStr, sprite: cardSprite });
-
                     this.cardLayer.addChild(cardSprite);
+                    
                     if (!player.uiCards) player.uiCards = [];
                     player.uiCards.push(cardSprite);
                 }
 
+                this.heroCardData.forEach((c) => {
+                    this.cardLayer.addChild(c.sprite);
+                });
+
+                this.setupAllDragEvents();
+                
                 this.drawSortButton(target.x + startOffset - 10, targetY + 80);
             }
         }
+
+        this.previousHeroCards = hero && hero.serverCards ? [...hero.serverCards] : [];
+        this.previousDiscardPile = this.gameState.discardPile ? [...this.gameState.discardPile] : [];
+        this.lastTurnSeat = this.gameState.currentTurnSeat;
     }
 
-    private onHeroCardClicked(cardStr: string, clickedSprite: PIXI.Container) {
-        const baseTargetY = this.seatCoords[0].y - 112;
-
-        this.heroCardData.forEach(c => {
-            c.sprite.y = baseTargetY;
+    private setupAllDragEvents() {
+        this.heroCardData.forEach((c, idx) => {
+            c.sprite.removeAllListeners();
+            c.sprite.eventMode = 'static';
+            c.sprite.cursor = 'pointer';
+            
+            c.sprite.on('pointerdown', (e) => {
+                e.stopPropagation(); 
+                this.onHeroDragStart(e, c.sprite, idx);
+            });
         });
+    }
 
-        if (this.selectedCardStr === cardStr) {
-            this.selectedCardStr = null;
-            this.callbacks.onCardSelected(null);
+    private onHeroDragStart(event: PIXI.FederatedPointerEvent, cardContainer: PIXI.Container, index: number) {
+        if (this.isDealingCardsAnimationRunning || this.draggingCardSprite) return;
+        
+        this.draggingCardSprite = cardContainer;
+        this.draggingLogicalIndex = index;
+        this.dragInitialPointerX = event.global.x;
+        this.dragInitialPointerY = event.global.y;
+        this.dragHasMoved = false; 
+
+        this.dragSlotsX = this.heroCardData.map(c => c.sprite.x);
+        this.dragInitialVisualX = cardContainer.x;
+
+        this.cardLayer.setChildIndex(cardContainer, this.cardLayer.children.length - 1);
+
+        gsap.to(cardContainer.scale, { x: this.currentHeroScale * 0.96, y: this.currentHeroScale * 0.96, duration: 0.15 });
+        cardContainer.alpha = 1.0; 
+
+        const sprite = cardContainer.children[0] as PIXI.Sprite;
+        if(sprite) gsap.to(sprite, { angle: -6, duration: 0.15 });
+
+        const targetY = (this.seatCoords[0]?.y || 0) - 115;
+        gsap.to(cardContainer, { y: targetY + 23, duration: 0.15, ease: "power2.out" });
+    }
+
+    private onHeroDragMove(event: PIXI.FederatedPointerEvent) {
+        if (!this.draggingCardSprite) return;
+
+        const dx = event.global.x - this.dragInitialPointerX;
+        const dy = event.global.y - this.dragInitialPointerY;
+        
+        if (!this.dragHasMoved && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+            this.dragHasMoved = true;
+        }
+
+        if (!this.dragHasMoved) return; 
+
+        this.cardLayer.setChildIndex(this.draggingCardSprite, this.cardLayer.children.length - 1); 
+
+        const draggedX = this.dragInitialVisualX + dx;
+        const standardY = (this.seatCoords[0]?.y || 0) - 115;
+
+        this.draggingCardSprite.x = draggedX;
+        this.draggingCardSprite.y = standardY + 23; 
+
+        let closestIndex = this.draggingLogicalIndex;
+        let minDistance = Infinity;
+        for (let i = 0; i < this.dragSlotsX.length; i++) {
+            const dist = Math.abs(draggedX - this.dragSlotsX[i]);
+            if (dist < minDistance) {
+                minDistance = dist;
+                closestIndex = i;
+            }
+        }
+
+        if (closestIndex !== this.draggingLogicalIndex) {
+            const draggedData = this.heroCardData.splice(this.draggingLogicalIndex, 1)[0];
+            this.heroCardData.splice(closestIndex, 0, draggedData);
+
+            if (this.selectedCardContainer === this.draggingCardSprite) {
+                // Mantém selecionado em drag
+            } else if (this.selectedCardContainer === this.heroCardData[this.draggingLogicalIndex].sprite) {
+                // Ignora mudança de selection
+            }
+
+            this.heroCardData.forEach((c, idx) => {
+                if (c.sprite !== this.draggingCardSprite) {
+                    gsap.to(c.sprite, {
+                        x: this.dragSlotsX[idx],
+                        duration: 0.2,
+                        ease: "power2.out",
+                        overwrite: "auto" 
+                    });
+                }
+            });
+            this.draggingLogicalIndex = closestIndex;
+        }
+    }
+
+    private onHeroDragEnd(event: PIXI.FederatedPointerEvent) {
+        if (!this.draggingCardSprite) return;
+
+        const card = this.draggingCardSprite;
+        const logicalIndex = this.draggingLogicalIndex;
+        this.draggingCardSprite = null; 
+
+        gsap.to(card.scale, { x: this.currentHeroScale, y: this.currentHeroScale, duration: 0.2 });
+        card.alpha = 1.0;
+        
+        const sprite = card.children[0] as PIXI.Sprite;
+        if(sprite) gsap.to(sprite, { angle: 0, duration: 0.2 });
+
+        const standardY = (this.seatCoords[0]?.y || 0) - 115;
+
+        if (this.dragHasMoved && event.global.y < standardY - 50) {
+            const cardStr = this.heroCardData[logicalIndex].str;
+            
+            if (this.callbacks.onDiscardCard) {
+                this.callbacks.onDiscardCard(cardStr);
+            }
+            
+            gsap.to(card, { x: this.dragSlotsX[logicalIndex], y: standardY, duration: 0.2, ease: "power2.out" });
+            this.draggingLogicalIndex = -1;
+            this.heroCardData.forEach((c) => { this.cardLayer.addChild(c.sprite); });
+            this.setupAllDragEvents();
+            return;
+        }
+
+        if (!this.dragHasMoved) {
+            this.onHeroCardClicked(this.heroCardData[logicalIndex].str, card);
+            card.x = this.dragSlotsX[logicalIndex]; 
+            card.y = standardY; 
+            
+            this.draggingLogicalIndex = -1;
+            this.heroCardData.forEach((c) => {
+                this.cardLayer.addChild(c.sprite);
+            });
+            this.setupAllDragEvents(); 
         } else {
-            this.selectedCardStr = cardStr;
-            clickedSprite.y = baseTargetY - 25;
-            this.callbacks.onCardSelected(cardStr);
+            this.selectedCardContainer = null;
+            this.selectedCardStr = null;
+            if (this.callbacks.onCardSelected) this.callbacks.onCardSelected(null);
+
+            gsap.to(card, {
+                x: this.dragSlotsX[logicalIndex],
+                y: standardY, 
+                duration: 0.2,
+                ease: "power2.out",
+                onComplete: () => {
+                    this.draggingLogicalIndex = -1;
+                    this.heroCardData.forEach((c) => {
+                        this.cardLayer.addChild(c.sprite);
+                    });
+                    this.setupAllDragEvents(); 
+                }
+            });
+
+            const hero = this.gameState.players.find((p: any) => p.isHero);
+            if (hero && hero.serverCards) {
+                hero.serverCards = this.heroCardData.map(c => c.str);
+                if (this.callbacks.onHandReordered) {
+                    this.callbacks.onHandReordered(hero.serverCards);
+                }
+            }
         }
     }
 
@@ -598,6 +1040,28 @@ export class CachetaPixiEngine {
         }).catch(() => {
             if (this.app) this.app.ticker.remove(trailAnim);
         });
+    }
+
+    private async performAnimation(obj: PIXI.Container, targetX: number, targetY: number, speed: number) {
+        if (!obj || obj.destroyed || !this.app) return Promise.resolve();
+        if (document.hidden) {
+            obj.x = targetX;
+            obj.y = targetY;
+            return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+            gsap.to(obj, {
+                x: targetX,
+                y: targetY,
+                duration: 0.35, 
+                ease: "power2.out",
+                onComplete: () => resolve()
+            });
+        });
+    }
+
+    private pixiDelay(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     public async startGameAutomatically() {
@@ -636,33 +1100,28 @@ export class CachetaPixiEngine {
 
                     const totalCards = 9;
                     const layout = this.getHeroLayout(totalCards);
-                    const finalScale = layout.scale;
-                    const spreadFactor = layout.spreadFactor;
-                    
-                    const startOffset = - ((totalCards - 1) * spreadFactor) / 2;
-                    const targetY = this.seatCoords[0].y - 112;
+                    const positions = this.calculateHeroXPositions(player.serverCards || [], layout.scale, layout.availableWidth, this.sortMode, this.gameState.viraCard);
+                    const totalW = positions.length > 0 ? positions[positions.length - 1] : 0;
+                    const startOffset = -totalW / 2;
+                    const targetY = (this.seatCoords[0]?.y || 0) - 115;
 
                     for (let c = 0; c < 3; c++) {
                         if (!this.isDealingCardsAnimationRunning) break; 
 
                         const cardIndex = (round * 3) + c;
-                        const finalX = target.x + startOffset + (cardIndex * spreadFactor);
+                        const finalX = target.x + startOffset + positions[cardIndex];
 
                         const cardStr = player.serverCards ? player.serverCards[cardIndex] : "A♠";
                         const rank = cardStr ? (cardStr.slice(0, -1) || "A") : "A";
                         const suit = cardStr ? (cardStr.slice(-1) || "♠") : "♠";
 
                         const card = this.deckInstance.createCardToDeal(true, rank, suit);
-                        card.scale.set(finalScale);
+                        card.scale.set(layout.scale);
 
                         card.x = this.MONTE_X;
                         card.y = this.MONTE_Y;
 
                         this.cardLayer.addChild(card);
-
-                        card.eventMode = 'static';
-                        card.cursor = 'pointer';
-                        card.on('pointerdown', () => this.onHeroCardClicked(cardStr, card));
                         this.heroCardData.push({ str: cardStr, sprite: card });
 
                         if (!player.uiCards) player.uiCards = [];
@@ -673,6 +1132,10 @@ export class CachetaPixiEngine {
                     }
                     
                     if (round === 2) {
+                        this.heroCardData.forEach((c) => {
+                            this.cardLayer.addChild(c.sprite);
+                        });
+                        this.setupAllDragEvents();
                         this.drawSortButton(target.x + startOffset - 10, targetY + 80);
                     }
 
@@ -689,11 +1152,10 @@ export class CachetaPixiEngine {
                 viraCard.x = this.MONTE_X;
                 viraCard.y = this.MONTE_Y;
                 viraCard.rotation = Math.PI / -2; 
+                viraCard.eventMode = 'none';
 
-                const deckIndex = this.mainLayer.getChildIndex(this.deckInstance!.view);
-                this.mainLayer.addChildAt(viraCard, Math.max(0, deckIndex));
+                this.baseDeckLayer.addChildAt(viraCard, 0);
 
-                this.cardLayer.addChild(viraCard);
                 this.launchCardAnimation(viraCard, this.VIRA_X, this.VIRA_Y, 0xff6bfb);
 
                 await this.pixiDelay(200);
@@ -716,11 +1178,15 @@ export class CachetaPixiEngine {
     }
 
     public destroy() {
+        this.resetWarningCard();
+        
         this.activeFireParticles.forEach(p => {
             if (p.mesh.parent) p.mesh.parent.removeChild(p.mesh);
             p.mesh.destroy();
         });
         this.activeFireParticles.length = 0;
+        
+        gsap.killTweensOf(this.heroCardData.map(c => c.sprite));
 
         if (this.app) { 
             this.app.destroy({ removeView: true, children: true, texture: true, baseTexture: true }); 
@@ -728,49 +1194,47 @@ export class CachetaPixiEngine {
         }
     }
 
-    private safeDestroy(obj: PIXI.Container | null) {
-        if (obj && !obj.destroyed) {
-            obj.visible = false; 
-            if (this.app && obj.parent) obj.parent.removeChild(obj);
-            setTimeout(() => {
-                if (obj && !obj.destroyed) {
-                    try { obj.destroy({ children: true }); } catch (e) {}
-                }
-            }, 1000);
+    private applyWarningToLastCard(seatIndex: number) {
+        const player = this.gameState.players.find((p: any) => p.seat === seatIndex);
+        if (!player) return;
+
+        let targetContainer: PIXI.Container | null = null;
+
+        if (player.isHero && this.heroCardData.length > 0) {
+            targetContainer = this.heroCardData[this.heroCardData.length - 1].sprite;
+        } else if (player.uiCards && player.uiCards.length > 0) {
+            targetContainer = player.uiCards[player.uiCards.length - 1];
+        }
+
+        if (!targetContainer) return;
+
+        if (this.warningCardSprite !== targetContainer) {
+            this.resetWarningCard();
+            this.warningCardSprite = targetContainer;
+        }
+
+        this.warningTime += 0.15;
+        const pulse = 0.6 + Math.abs(Math.sin(this.warningTime)) * 0.4;
+
+        const sprite = this.warningCardSprite.children[0] as PIXI.Sprite;
+        if (sprite && !sprite.destroyed) {
+            sprite.tint = 0xff6666; 
+            sprite.alpha = pulse;
         }
     }
 
-    private pixiDelay(ms: number): Promise<void> {
-        return new Promise(resolve => {
-            if (!this.app || !this.app.ticker) {
-                resolve();
-                return;
+    public resetWarningCard() {
+        if (this.warningCardSprite) {
+            const sprite = this.warningCardSprite.children[0] as PIXI.Sprite;
+            if (sprite && !sprite.destroyed) {
+                sprite.tint = 0xffffff;
+                sprite.alpha = 1.0;
             }
-            let elapsed = 0;
-            const tick = (ticker: PIXI.Ticker) => {
-                elapsed += ticker.deltaMS;
-                if (elapsed >= ms) {
-                    if (this.app && this.app.ticker) {
-                        this.app.ticker.remove(tick);
-                    }
-                    resolve();
-                }
-            };
-            this.app.ticker.add(tick);
-        });
-    }
-
-    private async performAnimation(obj: PIXI.Container, targetX: number, targetY: number, speed: number) {
-        if (!obj || obj.destroyed || !this.app) return Promise.resolve();
-        if (document.hidden) {
-            obj.x = targetX;
-            obj.y = targetY;
-            return Promise.resolve();
+            this.warningCardSprite = null;
         }
-        return Animator.animateTo(this.app, obj, targetX, targetY, speed);
     }
 
-    private updateFramePixi() {
+private updateFramePixi() {
         if (!this.app) return;
         
         if (this.tableInfoTextUI) {
@@ -792,7 +1256,11 @@ export class CachetaPixiEngine {
             }
         }
 
-        if (this.activeTimerSeat === -1) return;
+        if (this.activeTimerSeat === -1) {
+            this.resetWarningCard();
+            return;
+        }
+        
         const seatUi = this.playerSeats[this.activeTimerSeat];
         if (!seatUi) return;
 
@@ -800,6 +1268,32 @@ export class CachetaPixiEngine {
 
         if (timeLeft <= 0) {
             seatUi.updateTimer(0, 0);
+            this.resetWarningCard();
+
+            // 👇 SISTEMA ANTI-ZOMBIE (Auto Descarte no Frontend se o Backend falhar) 👇
+            if (timeLeft < -1500 && !this.hasFiredTimeout) {
+                this.hasFiredTimeout = true;
+                const hero = this.gameState.players.find((p: any) => p.isHero);
+                if (hero && hero.seat === this.activeTimerSeat && this.gameState.phase === 'betting') {
+                    
+                    // Aborta o arrasto para liberar a carta para o descarte automático
+                    if (this.draggingCardSprite) {
+                        this.draggingCardSprite = null;
+                        this.draggingLogicalIndex = -1;
+                    }
+                    
+                    if (!hero.hasDrawnThisTurn && this.callbacks.onDrawCard) {
+                        this.callbacks.onDrawCard(false); // Puxa do monte
+                        setTimeout(() => {
+                            if (this.callbacks.onDiscardCard && this.heroCardData.length > 0) {
+                                this.callbacks.onDiscardCard(this.heroCardData[this.heroCardData.length - 1].str); // Descarta a última
+                            }
+                        }, 800);
+                    } else if (this.callbacks.onDiscardCard && this.heroCardData.length > 0) {
+                        this.callbacks.onDiscardCard(this.heroCardData[this.heroCardData.length - 1].str);
+                    }
+                }
+            }
             return;
         }
 
@@ -808,16 +1302,30 @@ export class CachetaPixiEngine {
 
         seatUi.updateTimer(progress, secLeft);
 
+        // 👇 NOVO: Limite dinâmico (25%) e folga de 500ms para a animação estabilizar antes de piscar
+        const thresholdMs = (this.TIMER_DURATION_SEC * 1000) * 0.25;
+        const blinkMs = thresholdMs - 500;
+
+        if (timeLeft <= blinkMs && timeLeft > 0) {
+            this.applyWarningToLastCard(this.activeTimerSeat);
+        } else {
+            this.resetWarningCard();
+        }
+
         if (progress > 0 && timeLeft > 0) {
             const tipPos = seatUi.getTimerTipPosition(progress);
 
             for (let i = 0; i < 2; i++) {
+                const color = this.MAGIC_COLORS[Math.floor(Math.random() * this.MAGIC_COLORS.length)];
+                const pX = tipPos.x + (Math.random() - 0.5) * 4;
+                const pY = tipPos.y + (Math.random() - 0.5) * 4;
+                
                 const p = new PIXI.Graphics();
                 const size = Math.random() * 3 + 1.5;
                 p.circle(0, 0, size);
-                p.fill({ color: this.MAGIC_COLORS[Math.floor(Math.random() * this.MAGIC_COLORS.length)], alpha: 0.8 });
-                p.x = tipPos.x + (Math.random() - 0.5) * 4;
-                p.y = tipPos.y + (Math.random() - 0.5) * 4;
+                p.fill({ color, alpha: 0.8 });
+                p.x = pX;
+                p.y = pY;
                 
                 seatUi.container.addChild(p);
                 this.activeFireParticles.push({ mesh: p, life: 1.0, vx: (Math.random() - 0.5) * 1.5, vy: Math.random() * -2 - 0.5 });
@@ -925,5 +1433,33 @@ export class CachetaPixiEngine {
             });
             currentX += groupGap - overlap;
         });
+    }
+
+    private setupGlobalDragListeners() {
+        if (this.app && this.app.stage) {
+            this.app.stage.on('pointermove', (e) => this.onHeroDragMove(e));
+            this.app.stage.on('pointerup', (e) => this.onHeroDragEnd(e));
+            this.app.stage.on('pointerupoutside', (e) => this.onHeroDragEnd(e));
+        }
+    }
+
+    private onHeroCardClicked(cardStr: string, card: PIXI.Container) {
+        if (this.selectedCardContainer === card) {
+            this.selectedCardContainer = null; 
+            this.selectedCardStr = null;
+        } else {
+            this.selectedCardContainer = card; 
+            this.selectedCardStr = cardStr;
+        }
+        if (this.callbacks.onCardSelected) {
+            this.callbacks.onCardSelected(this.selectedCardStr);
+        }
+        this.sortHeroHand(); 
+    }
+    
+    private safeDestroy(container: PIXI.Container | null) {
+        if (!container) return;
+        if (container.parent) container.parent.removeChild(container);
+        container.destroy({ children: true });
     }
 }
