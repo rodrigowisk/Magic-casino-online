@@ -2,10 +2,10 @@
 using Microsoft.AspNetCore.SignalR;
 using Backend.Game.Services;
 using Backend.Game.Models.RealTime;
-using System.Security.Claims;
 using System.Threading.Tasks;
 using System;
 using System.Linq;
+using System.Text.Json; // 👇 Adicionado para o C# conseguir ler o formato do Javascript
 
 namespace Backend.Game.Hubs;
 
@@ -19,42 +19,44 @@ public class GameHub : Hub
         _gameManager = gameManager;
     }
 
-    // NOVO MÉTODO: O Frontend do Lobby deve chamar isso ao conectar no Hub
     public async Task RegisterUser(string userId)
     {
         if (!string.IsNullOrEmpty(userId))
         {
-            // Cria um grupo exclusivo para este usuário (para atualizar todas as abas dele)
             await Groups.AddToGroupAsync(Context.ConnectionId, $"user_{userId}");
         }
     }
 
-    // Avatar adicionado como parâmetro opcional
     public async Task JoinTable(string tableId, string localUserId, string localUserName, string avatar = "default.webp")
     {
-        var userId = string.IsNullOrWhiteSpace(localUserId) ? Context.ConnectionId : localUserId;
-        var userName = string.IsNullOrWhiteSpace(localUserName) ? "Jogador" : localUserName;
-
-        // Garante que o usuário está no seu grupo pessoal
-        await Groups.AddToGroupAsync(Context.ConnectionId, $"user_{userId}");
-        await Groups.AddToGroupAsync(Context.ConnectionId, tableId);
-
-        var player = new PlayerState
+        try
         {
-            ConnectionId = Context.ConnectionId,
-            UserId = userId,
-            Name = userName,
-            Avatar = avatar // Registra o avatar recebido do Vue
-        };
+            var userId = string.IsNullOrWhiteSpace(localUserId) ? Context.ConnectionId : localUserId;
+            var userName = string.IsNullOrWhiteSpace(localUserName) ? "Jogador" : localUserName;
 
-        _gameManager.AddPlayerToTable(tableId, player);
-        var tableState = _gameManager.GetOrCreateTable(tableId);
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"user_{userId}");
+            await Groups.AddToGroupAsync(Context.ConnectionId, tableId);
 
-        await Clients.GroupExcept(tableId, Context.ConnectionId).SendAsync("PlayerJoined", player);
-        await Clients.Caller.SendAsync("ReceiveTableState", tableState);
+            var player = new PlayerState
+            {
+                ConnectionId = Context.ConnectionId,
+                UserId = userId,
+                Name = userName,
+                Avatar = avatar
+            };
+
+            _gameManager.AddPlayerToTable(tableId, player);
+            var tableState = _gameManager.GetOrCreateTable(tableId);
+
+            await Clients.GroupExcept(tableId, Context.ConnectionId).SendAsync("PlayerJoined", player);
+            await Clients.Caller.SendAsync("ReceiveTableState", tableState);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[CRÍTICO] Erro no JoinTable: {ex.Message}");
+        }
     }
 
-    // Permite ao Vue trocar o avatar do jogador em tempo real
     public async Task UpdateAvatar(string tableId, string newAvatar)
     {
         if (_gameManager.UpdatePlayerAvatar(tableId, Context.ConnectionId, newAvatar))
@@ -64,66 +66,92 @@ public class GameHub : Hub
         }
     }
 
-    public async Task SitDown(string tableId, int seat, decimal buyIn, string localUserId)
+    public async Task SitDown(string tableId, int seat, object buyInRaw, string localUserId)
     {
-        // 👇 A TRAVA ANTI-HACKER AQUI
-        if (buyIn <= 0)
+        Console.WriteLine($"\n[DEBUG] === TENTATIVA DE SENTAR INICIADA ===");
+
+        try
         {
-            await Clients.Caller.SendAsync("ReceiveError", "Tentativa de fraude detectada: Valor inválido.");
-            return;
+            // 👇 CORREÇÃO: Lendo o número corretamente do formato JsonElement do SignalR
+            decimal buyIn = 0;
+            if (buyInRaw is JsonElement jsonElement)
+            {
+                buyIn = jsonElement.GetDecimal();
+            }
+            else
+            {
+                buyIn = Convert.ToDecimal(buyInRaw);
+            }
+
+            if (buyIn <= 0)
+            {
+                await Clients.Caller.SendAsync("ReceiveError", "Tentativa de fraude detectada: Valor inválido.");
+                return;
+            }
+
+            bool seated = await _gameManager.SitPlayer(tableId, Context.ConnectionId, seat, buyIn);
+
+            if (seated)
+            {
+                await Clients.Group(tableId).SendAsync("PlayerSatDown", seat);
+                await Clients.Group(tableId).SendAsync("TableStateUpdated", _gameManager.GetOrCreateTable(tableId));
+                await CheckAndBroadcastGameStart(tableId);
+
+                int count = _gameManager.GetSeatedPlayerCount(tableId);
+                await Clients.All.SendAsync("LobbyTableUpdated", tableId, count);
+            }
+            else
+            {
+                await Clients.Caller.SendAsync("ReceiveError", "Assento ocupado ou saldo insuficiente na carteira para esse Buy-in.");
+            }
         }
-
-        var tableState = _gameManager.GetOrCreateTable(tableId);
-        int seatedCount = tableState.Players.Count(p => p.IsSeated);
-
-        if (seatedCount >= tableState.MaxPlayers || seat >= tableState.MaxPlayers)
+        catch (Exception ex)
         {
-            await Clients.Caller.SendAsync("ReceiveError", "Mesa cheia ou assento inválido.");
-            return;
-        }
-
-        // AGORA É ASYNC: Aguarda o GameManager verificar o saldo na carteira (Identity)
-        bool seated = await _gameManager.SitPlayer(tableId, Context.ConnectionId, seat, buyIn);
-
-        if (seated)
-        {
-            // 👇 A LINHA MÁGICA ENTRA AQUI! 👇
-            // Avisa o frontend especificamente que alguém acabou de se sentar nesta posição
-            await Clients.Group(tableId).SendAsync("PlayerSatDown", seat);
-
-            await Clients.Group(tableId).SendAsync("TableStateUpdated", _gameManager.GetOrCreateTable(tableId));
-            await CheckAndBroadcastGameStart(tableId);
-        }
-        else
-        {
-            await Clients.Caller.SendAsync("ReceiveError", "Falha ao sentar. Verifique o seu saldo.");
+            Console.WriteLine($"[DEBUG] CRÍTICO! Exception estourou no SitDown: {ex.Message}");
+            await Clients.Caller.SendAsync("ReceiveError", $"Erro no servidor ao tentar sentar: {ex.Message}");
         }
     }
 
-
-    public async Task Rebuy(string tableId, decimal amount)
+    public async Task Rebuy(string tableId, object amountRaw)
     {
-        // 👇 A TRAVA ANTI-HACKER AQUI
-        if (amount <= 0)
+        Console.WriteLine($"\n[DEBUG] === TENTATIVA DE RECARGA INICIADA ===");
+        try
         {
-            await Clients.Caller.SendAsync("ReceiveError", "Tentativa de fraude detectada: Valor inválido.");
-            return;
-        }
+            // 👇 CORREÇÃO: Lendo o número corretamente
+            decimal amount = 0;
+            if (amountRaw is JsonElement jsonElement)
+            {
+                amount = jsonElement.GetDecimal();
+            }
+            else
+            {
+                amount = Convert.ToDecimal(amountRaw);
+            }
 
-        // AGORA É ASYNC: Aguarda o GameManager debitar o rebuy da carteira (Identity)
-        bool rebuySuccess = await _gameManager.Rebuy(tableId, Context.ConnectionId, amount);
+            if (amount <= 0)
+            {
+                await Clients.Caller.SendAsync("ReceiveError", "Tentativa de fraude detectada: Valor inválido.");
+                return;
+            }
 
-        if (rebuySuccess)
-        {
-            await Clients.Group(tableId).SendAsync("TableStateUpdated", _gameManager.GetOrCreateTable(tableId));
-            await CheckAndBroadcastGameStart(tableId);
+            bool rebuySuccess = await _gameManager.Rebuy(tableId, Context.ConnectionId, amount);
+
+            if (rebuySuccess)
+            {
+                await Clients.Group(tableId).SendAsync("TableStateUpdated", _gameManager.GetOrCreateTable(tableId));
+                await CheckAndBroadcastGameStart(tableId);
+            }
+            else
+            {
+                await Clients.Caller.SendAsync("ReceiveError", "Falha no rebuy. Assento perdido ou saldo insuficiente.");
+            }
         }
-        else
+        catch (Exception ex)
         {
-            await Clients.Caller.SendAsync("ReceiveError", "Falha no rebuy. Verifique o seu saldo.");
+            Console.WriteLine($"[DEBUG] CRÍTICO no Rebuy: {ex.Message}");
+            await Clients.Caller.SendAsync("ReceiveError", $"Erro no servidor ao tentar recarregar: {ex.Message}");
         }
     }
-
 
     public Task SetLeaveNextHand(string tableId, bool willLeave)
     {
@@ -133,72 +161,110 @@ public class GameHub : Hub
 
     public async Task SkipBet(string tableId, string localUserId)
     {
-        if (_gameManager.SkipTurn(tableId, Context.ConnectionId, out int seat, out bool roundEnded))
+        try
         {
-            await Clients.Group(tableId).SendAsync("PlayerSkipped", seat);
-            await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, 2000);
+            if (_gameManager.SkipTurn(tableId, Context.ConnectionId, out int seat, out bool roundEnded))
+            {
+                await Clients.Group(tableId).SendAsync("PlayerSkipped", seat);
+                await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, 2000);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erro no SkipBet: {ex.Message}");
         }
     }
 
-    public async Task ConfirmBet(string tableId, decimal amount, string localUserId)
+    public async Task ConfirmBet(string tableId, object amountRaw, string localUserId)
     {
-        if (_gameManager.PlaceBet(tableId, Context.ConnectionId, amount, out int seat, out bool isWin, out bool potBroken, out bool roundEnded, out string[] playedCards, out string centerCardRevealed))
+        try
         {
-            await Clients.Group(tableId).SendAsync("PlayerBetted", seat, amount, isWin, potBroken, playedCards, centerCardRevealed);
+            // 👇 CORREÇÃO: Lendo o número corretamente
+            decimal amount = 0;
+            if (amountRaw is JsonElement jsonElement)
+            {
+                amount = jsonElement.GetDecimal();
+            }
+            else
+            {
+                amount = Convert.ToDecimal(amountRaw);
+            }
 
-            int delay = 8000;
-            if (isWin) delay = 8500;
-            if (potBroken) delay += 2500;
+            if (_gameManager.PlaceBet(tableId, Context.ConnectionId, amount, out int seat, out bool isWin, out bool potBroken, out bool roundEnded, out string[] playedCards, out string centerCardRevealed))
+            {
+                await Clients.Group(tableId).SendAsync("PlayerBetted", seat, amount, isWin, potBroken, playedCards, centerCardRevealed);
 
-            await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, delay);
+                int delay = 8000;
+                if (isWin) delay = 8500;
+                if (potBroken) delay += 2500;
+
+                await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, delay);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erro no ConfirmBet: {ex.Message}");
         }
     }
 
     public async Task StandUp(string tableId)
     {
-        // 1. Descobre a posição do jogador ANTES de ele ser levantado pelo sistema
-        var tableState = _gameManager.GetOrCreateTable(tableId);
-        var player = tableState.Players.FirstOrDefault(p => p.ConnectionId == Context.ConnectionId && p.IsSeated);
-        int logicalSeat = player?.Seat ?? -1;
-
-        // 2. Levanta e reembolsa as fichas
-        bool stoodUp = await _gameManager.StandUp(tableId, Context.ConnectionId);
-
-        if (stoodUp)
+        try
         {
-            // 3. 💣 DISPARA A BOMBA DE FUMO NO FRONTEND! 💣
-            if (logicalSeat != -1)
-            {
-                await Clients.Group(tableId).SendAsync("PlayerStoodUp", logicalSeat);
-            }
+            var tableState = _gameManager.GetOrCreateTable(tableId);
+            var player = tableState.Players.FirstOrDefault(p => p.ConnectionId == Context.ConnectionId && p.IsSeated);
+            int logicalSeat = player?.Seat ?? -1;
 
-            var newState = _gameManager.GetOrCreateTable(tableId);
-            await Clients.Group(tableId).SendAsync("TableStateUpdated", newState);
+            bool stoodUp = await _gameManager.StandUp(tableId, Context.ConnectionId);
+
+            if (stoodUp)
+            {
+                if (logicalSeat != -1)
+                {
+                    await Clients.Group(tableId).SendAsync("PlayerStoodUp", logicalSeat);
+                }
+
+                var newState = _gameManager.GetOrCreateTable(tableId);
+                await Clients.Group(tableId).SendAsync("TableStateUpdated", newState);
+
+                int count = _gameManager.GetSeatedPlayerCount(tableId);
+                await Clients.All.SendAsync("LobbyTableUpdated", tableId, count);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erro no StandUp: {ex.Message}");
         }
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        // Recebe a mesa e a cadeira exata da Tupla
-        var (tableId, logicalSeat) = await _gameManager.RemovePlayerByConnectionIdAsync(Context.ConnectionId);
-
-        if (tableId != null)
+        try
         {
-            // Se ele estava sentado, solta a bomba de fumaça
-            if (logicalSeat != -1)
-            {
-                await Clients.Group(tableId).SendAsync("PlayerStoodUp", logicalSeat);
-            }
+            var (tableId, logicalSeat) = await _gameManager.RemovePlayerByConnectionIdAsync(Context.ConnectionId);
 
-            var tableState = _gameManager.GetOrCreateTable(tableId);
-            await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
+            if (tableId != null)
+            {
+                if (logicalSeat != -1)
+                {
+                    await Clients.Group(tableId).SendAsync("PlayerStoodUp", logicalSeat);
+                }
+
+                var tableState = _gameManager.GetOrCreateTable(tableId);
+                await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
+
+                int count = _gameManager.GetSeatedPlayerCount(tableId);
+                await Clients.All.SendAsync("LobbyTableUpdated", tableId, count);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Erro na Desconexão: {ex.Message}");
         }
 
         await base.OnDisconnectedAsync(exception);
     }
 
-
-    // MÉTODO AUXILIAR PARA EVITAR CÓDIGO REPETIDO
     private async Task CheckAndBroadcastGameStart(string tableId)
     {
         if (_gameManager.CheckAndStartGame(tableId))

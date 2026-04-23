@@ -58,30 +58,26 @@
           @confirm="invokeBuyIn"
         />
 
-        <RebuyModal 
-          v-if="showRebuyModal"
-          :minBuyIn="gameState.tableMinBuyIn"
-          :maxBalance="userTotalBalance"
-          @cancel="invokeStandUp"
-          @confirm="invokeRebuy"
-        />
-
         <MeinhoMenu 
           v-if="showMenuModal"
-          :animEnabled="animModeEnabled"
+          :soundEnabled="soundModeEnabled"
           :peekEnabled="peekModeEnabled"
+          :isSeated="isHeroSeated"
           @close="showMenuModal = false"
           @leave="handleMenuLeave"
           @lobby="handleLobby"
           @rules="handleMenuRules"
           @settings="handleMenuSettings"
-          @toggleAnimation="handleToggleAnimation"
+          @toggleSound="handleToggleSound"
           @togglePeek="handleTogglePeek"
+          @rebuy="handleMenuRebuy"
         />
 
         <transition name="fade-peeker">
           <MeinhoPeeker 
             v-if="showPeekerModal"
+            class="peeker-safe-hide"
+            :class="{ 'peeker-hidden': showRebuyModal || appAlertMessage !== '' }"
             ref="peekerRef"
             :cards="heroCards"
             @close="fecharPeekerERevelar"
@@ -102,7 +98,34 @@
           :players="gameState.players"
           @update:isOpen="showStatsModal = $event"
         />
-      </div></div>
+
+        <RebuyModal 
+          v-if="showRebuyModal"
+          :minBuyIn="gameState.tableMinBuyIn"
+          :maxBalance="userTotalBalance"
+          :currentChips="gameState.players.find(p => p.isHero)?.chips || 0"
+          @cancel="cancelRebuyAction"
+          @confirm="confirmRebuyAction"
+        />
+
+        <transition name="fade-alert">
+          <div class="custom-alert-overlay" v-if="appAlertMessage" @click.self="appAlertMessage = ''">
+            <div class="custom-alert-box">
+              <div class="alert-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#3ce48a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                  <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                </svg>
+              </div>
+              <h3>Aviso</h3>
+              <p v-html="appAlertMessage"></p>
+              <button class="btn-confirm-full" @click="appAlertMessage = ''">OK</button>
+            </div>
+          </div>
+        </transition>
+
+      </div>
+    </div>
 
     <div class="table-id-footer">
       ID da Mesa: {{ tableId }}
@@ -161,10 +184,11 @@ const myLastChips = ref(0);
 
 const showBuyInModal = ref(false);
 const pendingSitSeat = ref(-1);
-// 🔥 NOVO: Variável para a mesa saber em qual cadeira você tentou sentar!
 const expectedHeroLogicalSeat = ref(-1); 
 
 const showRebuyModal = ref(false);
+const isManualRebuy = ref(false);
+
 const showMenuModal = ref(false);
 const showPeekerModal = ref(false);
 
@@ -173,8 +197,10 @@ const showStatsModal = ref(false);
 const showHandHistoryModal = ref(false);
 const sessionHandHistory = ref<any[]>([]); 
 
-const animModeEnabled = ref(localStorage.getItem('magic_anim_enabled') !== '0'); 
+const soundModeEnabled = ref(localStorage.getItem('magic_sound_enabled') !== '0'); 
 const peekModeEnabled = ref(localStorage.getItem('magic_peek_enabled') !== '0'); 
+
+const appAlertMessage = ref('');
 
 const hasPeekedCurrentHand = ref(false); 
 const hasManuallyRevealedCards = ref(false); 
@@ -231,6 +257,10 @@ const modalMaxBalance = computed(() => {
         return gameState.tableMinBuyIn; 
     }
     return userTotalBalance.value;
+});
+
+const isHeroSeated = computed(() => {
+  return gameState.players.some(p => p.isHero && p.isSeated);
 });
 
 const myLogicalSeatOffset = ref(0);
@@ -296,7 +326,6 @@ const verificarAberturaFilar = () => {
     }
   }
 };
-
 
 watch(() => peekModeEnabled.value, (ligado) => {
   engine.setPeekMode(ligado);
@@ -367,13 +396,12 @@ async function fetchUserBalance() {
   }
 }
 
-// ============================================================================
-// CONFIGURAÇÃO DO GAME HUB COM OS EFEITOS (E MEMÓRIA DE CADEIRA)
-// ============================================================================
+// 👇 DECLARAÇÃO COMPLETA DO USEGAMEHUB SEM RESUMOS 👇
 const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvatar, {
     onReceiveTableState: (serverState: any) => syncTable(serverState),
+    
     onPlayerSkipped: async (logicalSeat: number) => {
-        if(!animModeEnabled.value || document.hidden) { flushPendingState(); return; }
+        if(document.hidden) { flushPendingState(); return; }
         
         isAnimating.value = true;
         try {
@@ -386,8 +414,9 @@ const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvata
             flushPendingState();
         }
     },
+    
     onPlayerBetted: async (logicalSeat: number, betAmount: number, isWin: boolean, potBroken: boolean, playedCards: string[], centerCardRevealed: string) => {
-        if(!animModeEnabled.value || document.hidden) { flushPendingState(); return; }
+        if(document.hidden) { flushPendingState(); return; }
         
         isAnimating.value = true;
         try {
@@ -401,8 +430,7 @@ const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvata
             flushPendingState();
         }
     },
-
-
+    
     onWalletBalanceUpdated: (newBalance: number) => {
         userTotalBalance.value = newBalance;
     },
@@ -422,14 +450,19 @@ const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvata
             (engine as any).playSitEffect(visualSeat);
         }
     },
+    
     onPlayerStoodUp: (logicalSeat: number) => {
         const visualSeat = (logicalSeat - myLogicalSeatOffset.value + gameState.maxPlayers) % gameState.maxPlayers;
         if (typeof (engine as any).playStandEffect === 'function') {
             (engine as any).playStandEffect(visualSeat);
         }
+    },
+    
+    onReceiveError: (msg: string) => {
+        appAlertMessage.value = `<span style="color: #ff4757; font-weight: bold;">Aviso do Servidor:</span><br><br>${msg}`;
     }
 });
-// ============================================================================
+
 
 const engine = new MeinhoPixiEngine(gameState, {
     setDealing: (v) => isDealing.value = v,
@@ -454,6 +487,7 @@ const engine = new MeinhoPixiEngine(gameState, {
             }).catch(e => {
                 console.error("Erro ao sentar automaticamente:", e);
                 expectedHeroLogicalSeat.value = -1; 
+                appAlertMessage.value = `<span style="color: #ff4757; font-weight: bold;">Erro do Servidor:</span><br><br>A conexão falhou ao tentar sentar. O seu backend C# recusou a requisição.`;
             });
             return;
         }
@@ -477,6 +511,7 @@ function invokeBuyIn(amount: number) {
         }).catch(e => {
             console.error("Erro ao sentar:", e);
             expectedHeroLogicalSeat.value = -1; 
+            appAlertMessage.value = `<span style="color: #ff4757; font-weight: bold;">Erro do Servidor:</span><br><br>O servidor C# abortou a ação de sentar. Verifique os logs da sua API.`;
         });
     }
 }
@@ -484,6 +519,25 @@ function invokeBuyIn(amount: number) {
 function cancelBuyIn() {
     showBuyInModal.value = false;
     pendingSitSeat.value = -1;
+}
+
+function handleMenuRebuy() {
+  showMenuModal.value = false;
+  isManualRebuy.value = true;
+  showRebuyModal.value = true;
+}
+
+function cancelRebuyAction() {
+  showRebuyModal.value = false;
+  if (!isManualRebuy.value) {
+    invokeStandUp(); 
+  }
+  isManualRebuy.value = false;
+}
+
+function confirmRebuyAction(amount: number) {
+  invokeRebuy(amount);
+  isManualRebuy.value = false;
 }
 
 watch(() => showPeekerModal.value, (isOpen) => {
@@ -651,8 +705,11 @@ function applyState(serverState: any) {
   if (gameState.pot === 0) engine.clearPotChips();
 
   if (heroPlayer && heroPlayer.isSeated && heroPlayer.chips <= 0 && heroPlayer.status !== 'playing') {
-      fetchUserBalance().then(() => showRebuyModal.value = true);
-  } else {
+      fetchUserBalance().then(() => {
+          isManualRebuy.value = false;
+          showRebuyModal.value = true;
+      });
+  } else if (!isManualRebuy.value) {
       showRebuyModal.value = false;
   }
 
@@ -667,7 +724,7 @@ function applyState(serverState: any) {
 
   if (needsDealing) {
     gameState.phase = normState.phase as any;
-    if(animModeEnabled.value) engine.startGameAutomatically();
+    engine.startGameAutomatically();
   } else if (normState.phase !== 'dealing') {
     gameState.phase = normState.phase as any;
   }
@@ -699,6 +756,12 @@ function invokeRebuy(amount: number) {
         gameHub.rebuy(amount).then(() => {
             showRebuyModal.value = false;
             fetchUserBalance(); 
+            
+            if (gameState.phase !== 'waiting') {
+                appAlertMessage.value = "Recarga efetuada com sucesso!<br><br>Suas fichas estarão disponíveis na mesa na próxima rodada.";
+            } else {
+                appAlertMessage.value = "Recarga efetuada com sucesso!<br><br>Suas fichas já foram adicionadas à mesa.";
+            }
         });
     }
 }
@@ -741,7 +804,6 @@ function invokeConfirmBet(payload: number | string | { amount: number }) {
     else if (typeof payload === 'string' && !isNaN(Number(payload))) betValue = Number(payload);
     else if (payload && typeof payload === 'object' && 'amount' in payload) betValue = Number(payload.amount);
     
-    // 🔥 CORREÇÃO: Garante que NUNCA envie uma aposta maior que o Pote ou maior que as fichas
     const hero = gameState.players.find(p => p.isHero);
     const heroChips = hero ? hero.chips : 0;
     const maxAllowed = Math.min(gameState.pot, heroChips);
@@ -828,9 +890,12 @@ function handleLobby() {
 function handleMenuRules() { showMenuModal.value = false; }
 function handleMenuSettings() { showMenuModal.value = false; }
 
-function handleToggleAnimation(enabled: boolean) { 
-  animModeEnabled.value = enabled; 
-  localStorage.setItem('magic_anim_enabled', enabled ? '1' : '0');
+function handleToggleSound(enabled: boolean) { 
+  soundModeEnabled.value = enabled; 
+  localStorage.setItem('magic_sound_enabled', enabled ? '1' : '0');
+  if(engine && typeof (engine as any).setSoundEnabled === 'function') {
+      (engine as any).setSoundEnabled(enabled);
+  }
 }
 
 function handleTogglePeek(enabled: boolean) { 
@@ -867,6 +932,10 @@ onMounted(async () => {
             pixiContainer.value, GAME_WIDTH, GAME_HEIGHT, getAvatarUrl('default.webp'), deckImg, singleChipImg, tableImgAsset, potChipsImg
         );
         engine.setPeekMode(peekModeEnabled.value); 
+        
+        if(typeof (engine as any).setSoundEnabled === 'function') {
+            (engine as any).setSoundEnabled(soundModeEnabled.value);
+        }
     } catch(e) { console.error(e); }
   }
   await gameHub.connect();
@@ -883,9 +952,6 @@ onUnmounted(() => {
   gameHub.disconnect();
   engine.destroy();
 });
-
-
-
 </script>
 
 <style scoped>
@@ -907,7 +973,6 @@ onUnmounted(() => {
   pointer-events: auto; 
 }
 
-/* Efeito de Fade para o botão de Mostrar Cartas */
 .fade-peeker-enter-active,
 .fade-peeker-leave-active {
   transition: opacity 0.6s ease-in-out;
@@ -915,6 +980,14 @@ onUnmounted(() => {
 .fade-peeker-enter-from,
 .fade-peeker-leave-to {
   opacity: 0;
+}
+
+.peeker-safe-hide {
+  transition: opacity 0.3s ease;
+}
+.peeker-hidden {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 .pixi-canvas { position: absolute; top: 0; left: 0; width: 430px; height: 900px; z-index: 2; pointer-events: auto !important; }
@@ -977,5 +1050,91 @@ onUnmounted(() => {
 @keyframes slideDownFade {
   0% { transform: translate(-50%, -20px); opacity: 0; }
   100% { transform: translate(-50%, 0); opacity: 1; }
+}
+
+.fade-alert-enter-active, .fade-alert-leave-active {
+  transition: opacity 0.3s ease;
+}
+.fade-alert-enter-from, .fade-alert-leave-to {
+  opacity: 0;
+}
+
+.custom-alert-overlay {
+  position: absolute;
+  top: 0; left: 0; width: 430px; height: 900px;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(5px);
+  z-index: 99999;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.custom-alert-box {
+  background: linear-gradient(145deg, #1a2639, #111827);
+  border: 2px solid #3ce48a;
+  border-radius: 16px;
+  padding: 24px;
+  width: 80%;
+  max-width: 320px;
+  text-align: center;
+  color: white;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.8), inset 0 0 20px rgba(60, 228, 138, 0.1);
+  animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+@keyframes popIn {
+  0% { transform: scale(0.8); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.alert-icon {
+  width: 50px;
+  height: 50px;
+  margin: 0 auto 15px auto;
+  background: rgba(60, 228, 138, 0.1);
+  border-radius: 50%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.alert-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.custom-alert-box h3 {
+  margin: 0 0 10px 0;
+  color: #3ce48a;
+  text-transform: uppercase;
+  font-size: 18px;
+  letter-spacing: 1px;
+}
+
+.custom-alert-box p {
+  font-size: 13px;
+  color: #8da1bc;
+  margin-bottom: 25px;
+  line-height: 1.4;
+}
+
+.btn-confirm-full {
+  background: #3ce48a;
+  color: #000;
+  padding: 12px 15px;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  border: none;
+  width: 100%;
+  text-transform: uppercase;
+  font-size: 13px;
+  transition: transform 0.1s ease;
+}
+
+.btn-confirm-full:active {
+  transform: scale(0.95);
 }
 </style>

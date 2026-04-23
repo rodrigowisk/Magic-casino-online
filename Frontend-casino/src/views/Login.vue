@@ -102,7 +102,18 @@ const fazerLogin = async () => {
   errorMessage.value = '';
   isLoading.value = true;
   try {
-    await authService.login(username.value.toUpperCase(), password.value);
+    // 👇 CAPTURAMOS A RESPOSTA DA API AQUI 👇
+    const userData = await authService.login(username.value.toUpperCase(), password.value);
+    
+    // 👇 SALVAMOS AS ROLES NO NAVEGADOR 👇
+    // Verifica se a API retornou as roles e salva no localStorage para o Menu Inferior ler
+    if (userData && userData.roles) {
+      localStorage.setItem('magic_roles', JSON.stringify(userData.roles));
+    } else {
+      // Se não vier role nenhuma, garante que limpamos resquícios de logins antigos
+      localStorage.setItem('magic_roles', JSON.stringify([]));
+    }
+
     router.push('/lobby');
   } catch (error: any) {
     errorMessage.value = error.message;

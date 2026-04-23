@@ -48,6 +48,9 @@ export class MeinhoPixiEngine {
     public readonly MAGIC_COLORS = [0x00f3ff, 0xa855f7, 0xff6bfb, 0xffffff];
     public peekMode: boolean = false;
 
+    // 👇 NOVO: Flag de controle mestre do som
+    public isSoundEnabled: boolean = true; 
+
     // --- SISTEMA DE ÁUDIO ---
     public somCarta: HTMLAudioElement | null = null;
     public somSentar: HTMLAudioElement | null = null;
@@ -63,7 +66,20 @@ export class MeinhoPixiEngine {
 
     constructor(public gameState: any, public callbacks: EngineCallbacks) {}
 
+    // 👇 NOVO: Função que liga ou desliga o som
+    public setSoundEnabled(enabled: boolean) {
+        this.isSoundEnabled = enabled;
+        if (!enabled) {
+            // Se o jogador desligou, garantimos que nenhum som contínuo (como o timer) fique tocando
+            this.pararSom(this.somTimer);
+            this.pararSom(this.somAlarm);
+        }
+    }
+
     public tocarSom(audio: HTMLAudioElement | null) {
+        // 👇 NOVO: Bloqueia o som antes de tocar se estiver desativado!
+        if (!this.isSoundEnabled) return; 
+
         if (audio) {
             audio.currentTime = 0;
             audio.play().catch(e => console.warn('Áudio bloqueado pelo navegador:', e));

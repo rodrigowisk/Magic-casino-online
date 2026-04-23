@@ -33,17 +33,29 @@
           </div>
         </button>
 
-        <div class="menu-item toggle-row" @click="toggleAnim">
+        <button v-if="isSeated" class="menu-item" @click="$emit('rebuy')">
+          <div class="item-left">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#3ce48a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="16"></line>
+              <line x1="8" y1="12" x2="16" y2="12"></line>
+            </svg>
+            <span class="success-text">Recarregar Fichas</span>
+          </div>
+        </button>
+
+        <div class="menu-item toggle-row" @click="toggleSound">
           <div class="item-left">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#00f3ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
             </svg>
             <div class="item-text-col">
-              <span class="normal-text">Animação</span>
-              <small>(economizar bateria)</small>
+              <span class="normal-text">Som do Jogo</span>
+              <small>(efeitos sonoros)</small>
             </div>
           </div>
-          <div class="custom-switch" :class="{ active: animEnabled }">
+          <div class="custom-switch" :class="{ active: soundEnabled }">
             <div class="switch-knob"></div>
           </div>
         </div>
@@ -68,18 +80,22 @@
 </template>
 
 <script setup lang="ts">
-import { defineProps, defineEmits } from 'vue';
+import { defineProps, defineEmits, withDefaults } from 'vue';
 
-const props = defineProps<{
-  animEnabled: boolean;
-  peekEnabled: boolean;
-}>();
+const props = withDefaults(defineProps<{
+  soundEnabled?: boolean;
+  peekEnabled?: boolean;
+  isSeated?: boolean; 
+}>(), {
+  soundEnabled: true, // O som agora inicia ligado
+  peekEnabled: false,
+  isSeated: false
+});
 
-// Adicionado o 'lobby' aos emits permitidos
-const emit = defineEmits(['close', 'leave', 'lobby', 'rules', 'settings', 'toggleAnimation', 'togglePeek']);
+const emit = defineEmits(['close', 'leave', 'lobby', 'rules', 'settings', 'toggleSound', 'togglePeek', 'rebuy']);
 
-function toggleAnim() {
-  emit('toggleAnimation', !props.animEnabled);
+function toggleSound() {
+  emit('toggleSound', !props.soundEnabled);
 }
 
 function togglePeek() {
@@ -88,19 +104,17 @@ function togglePeek() {
 </script>
 
 <style scoped>
-/* Fundo escuro cobrindo a tela toda */
 .menu-overlay {
   position: absolute;
   top: 0;
   left: 0;
   width: 430px; 
   height: 900px;
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(5px);
+  /* 👇 Fundo agora é transparente para você ver e usar a mesa 👇 */
+  background: transparent;
   z-index: 100; 
 }
 
-/* Gaveta Lateral Mais Enxuta e Auto-ajustável */
 .menu-content {
   position: absolute;
   left: 0;
@@ -228,6 +242,14 @@ function togglePeek() {
 
 .danger-text {
   color: #e74c3c;
+  font-family: Arial, sans-serif;
+  font-size: 14px; 
+  font-weight: bold;
+  white-space: nowrap; 
+}
+
+.success-text {
+  color: #3ce48a;
   font-family: Arial, sans-serif;
   font-size: 14px; 
   font-weight: bold;

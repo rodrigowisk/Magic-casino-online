@@ -61,12 +61,32 @@ const routes = [
   
   // 👇 Nova Rota do Agente 👇
   { path: '/agente', name: 'Agente', component: Agente },
-  { path: '/admin', name: 'OwnerPanel', component: OwnerPanel },
+  
+  // 👇 Rota do Admin (Blindada pela Role) 👇
+  { 
+    path: '/admin', 
+    name: 'OwnerPanel', 
+    component: OwnerPanel,
+    meta: { requiresAdmin: true } 
+  },
 ];
 
 const router = createRouter({
   history: createWebHistory(),
   routes,
+});
+
+// 👇 GUARDIÃO DE ROTAS (Bloqueia quem não é dono de acessar a URL direto) 👇
+router.beforeEach((to, from, next) => {
+  const rolesStr = localStorage.getItem('magic_roles');
+  const roles = rolesStr ? JSON.parse(rolesStr) : [];
+  const isAdmin = roles.includes('Owner') || roles.includes('Admin');
+
+  if (to.meta.requiresAdmin && !isAdmin) {
+    next('/lobby'); // Se tentar forçar a URL e não for dono, chuta de volta pro Lobby
+  } else {
+    next();
+  }
 });
 
 export default router;

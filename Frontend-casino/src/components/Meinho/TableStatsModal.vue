@@ -86,8 +86,8 @@ const formatProfit = (player: any) => {
   left: 0;
   width: 430px; 
   height: 900px;
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(5px);
+  /* 👇 Fundo agora é transparente 👇 */
+  background: transparent;
   z-index: 500; 
 }
 

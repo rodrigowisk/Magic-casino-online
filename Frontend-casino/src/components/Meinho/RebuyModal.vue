@@ -1,36 +1,51 @@
 <template>
-  <div class="rebuy-modal-overlay">
+  <div class="rebuy-modal-overlay" @click.self="$emit('cancel')">
     <div class="rebuy-modal">
       
-      <template v-if="maxBalance < minBuyIn">
+      <template v-if="maxBalance < minRebuy">
         <h2>Saldo Insuficiente</h2>
-        <p>Você precisa de pelo menos R$ {{ minBuyIn }} para continuar nesta mesa.</p>
-        <p class="balance-info">Conta Geral: R$ {{ maxBalance }}</p>
+        <p>Você precisa de pelo menos R$ {{ formatValue(minRebuy) }} para completar a mesa.</p>
+        <div class="balance-container">
+          <p class="balance-info">Na Mesa: R$ {{ formatValue(currentChips) }}</p>
+          <p class="balance-info">Conta Geral: R$ {{ formatValue(maxBalance) }}</p>
+        </div>
         
         <div class="modal-actions-single">
-          <button class="btn-cancel full-width" @click="$emit('cancel')">Levantar da Mesa</button>
+          <button class="btn-cancel full-width" @click="$emit('cancel')">Fechar / Levantar</button>
         </div>
       </template>
 
       <template v-else>
-        <h2>Suas fichas acabaram!</h2>
-        <p>Você deseja continuar no jogo?</p>
-        <p class="balance-info">Conta Geral: R$ {{ maxBalance }}</p>
+        <h2 v-if="currentChips === 0">Suas fichas acabaram!</h2>
+        <h2 v-else>Recarregar Fichas</h2>
+        
+        <p v-if="currentChips === 0">Você deseja continuar no jogo?</p>
+        <p v-else>Adicione fichas até o limite máximo da mesa.</p>
+        
+        <div class="balance-container">
+          <p class="balance-info mesa-val">Na Mesa: R$ {{ formatValue(currentChips) }}</p>
+          <p class="balance-info conta-val">Conta Geral: R$ {{ formatValue(maxBalance) }}</p>
+        </div>
         
         <div class="slider-container">
-          <label>Comprar: R$ {{ localRebuyAmount }}</label>
+          <label>Adicionar: R$ {{ formatValue(localRebuyAmount) }}</label>
           <input 
             type="range" 
-            :min="minBuyIn" 
-            :max="maxBalance" 
+            :min="minRebuy" 
+            :max="maxRebuy" 
+            step="5"
             v-model.number="localRebuyAmount" 
             class="styled-slider" 
           />
+          <div class="range-labels">
+            <span @click="localRebuyAmount = minRebuy">Min: R$ {{ formatValue(minRebuy) }}</span>
+            <span @click="localRebuyAmount = maxRebuy">Max: R$ {{ formatValue(maxRebuy) }}</span>
+          </div>
         </div>
 
         <div class="modal-actions">
-          <button class="btn-cancel" @click="$emit('cancel')">Não (Levantar)</button>
-          <button class="btn-confirm" @click="$emit('confirm', localRebuyAmount)">Sim (Comprar)</button>
+          <button class="btn-cancel" @click="$emit('cancel')">Cancelar</button>
+          <button class="btn-confirm" @click="$emit('confirm', localRebuyAmount)">Confirmar</button>
         </div>
       </template>
 
@@ -39,29 +54,43 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue';
+import { ref, watch, computed, onMounted } from 'vue';
 
 const props = defineProps<{
   minBuyIn: number;
   maxBalance: number;
+  currentChips: number; // NOVO: Propriedade que recebe as fichas que já estão na mesa
 }>();
 
-// Define os eventos que serão enviados para a mesa principal
 const emit = defineEmits(['confirm', 'cancel']);
 
-// O valor do rebuy fica isolado dentro do modal
-const localRebuyAmount = ref(props.minBuyIn);
+const formatValue = (val: number) => {
+  return Number(val).toFixed(2).replace('.', ',');
+};
 
-// Garante que o slider nunca fique abaixo da aposta mínima se ela mudar
-watch(() => props.minBuyIn, (newVal) => {
-  if (localRebuyAmount.value < newVal) {
-    localRebuyAmount.value = newVal;
-  }
+// 🧠 INTELIGÊNCIA: Calcula quanto falta para inteirar o Buy-in Mínimo.
+const minRebuy = computed(() => {
+  const deficit = props.minBuyIn - props.currentChips;
+  const absoluteMin = deficit > 0 ? deficit : 10; // Se ele já tem o mínimo, o rebuy base é 10
+  return Math.min(absoluteMin, props.maxBalance); 
+});
+
+// 🧠 INTELIGÊNCIA: Calcula o limite máximo da mesa (Ex: 10x o Buy-in Mínimo)
+const maxRebuy = computed(() => {
+  const tableAbsoluteMax = props.minBuyIn * 10; 
+  const allowedToInject = tableAbsoluteMax - props.currentChips;
+  return Math.min(allowedToInject > 0 ? allowedToInject : 0, props.maxBalance);
+});
+
+const localRebuyAmount = ref(minRebuy.value);
+
+watch(() => minRebuy.value, (newVal) => {
+  localRebuyAmount.value = newVal;
 });
 
 onMounted(() => {
-  if (localRebuyAmount.value < props.minBuyIn) {
-    localRebuyAmount.value = props.minBuyIn;
+  if (localRebuyAmount.value < minRebuy.value) {
+    localRebuyAmount.value = minRebuy.value;
   }
 });
 </script>
@@ -74,6 +103,7 @@ onMounted(() => {
   width: 430px;
   height: 900px;
   background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(5px);
   z-index: 100;
   display: flex;
   justify-content: center;
@@ -102,26 +132,39 @@ onMounted(() => {
 }
 
 .rebuy-modal p { 
-  font-size: 14px; 
+  font-size: 13px; 
   margin: 10px 0; 
+  color: #8da1bc;
+}
+
+.balance-container {
+  display: flex;
+  justify-content: space-between;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #1a2639;
+  margin: 15px 0;
 }
 
 .balance-info { 
-  color: #3ce48a; 
   font-weight: bold; 
-  font-size: 16px !important;
-  margin-bottom: 20px !important;
+  font-size: 12px !important;
+  margin: 0 !important;
 }
 
+.mesa-val { color: #f1c40f; }
+.conta-val { color: #3ce48a; }
+
 .slider-container { 
-  margin: 25px 0; 
+  margin: 25px 0 15px 0; 
 }
 
 .slider-container label { 
   display: block; 
-  margin-bottom: 10px; 
-  font-weight: bold; 
-  font-size: 16px; 
+  margin-bottom: 15px; 
+  font-weight: 900; 
+  font-size: 18px; 
   color: #fff;
 }
 
@@ -129,6 +172,27 @@ onMounted(() => {
   width: 100%; 
   accent-color: #3ce48a; 
   cursor: pointer;
+  height: 6px;
+  background: #111a26;
+  border-radius: 4px;
+  outline: none;
+}
+
+.range-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 10px;
+  color: #66768f;
+  font-weight: bold;
+}
+
+.range-labels span {
+  cursor: pointer;
+}
+
+.range-labels span:hover {
+  color: #3ce48a;
 }
 
 .modal-actions { 
@@ -164,8 +228,9 @@ onMounted(() => {
 }
 
 .btn-cancel { 
-  background: #e74c3c; 
-  color: white; 
+  background: transparent; 
+  color: #e74c3c; 
+  border: 1px solid #e74c3c;
 }
 
 .btn-confirm { 

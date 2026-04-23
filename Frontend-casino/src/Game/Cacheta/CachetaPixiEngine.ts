@@ -14,6 +14,7 @@ export interface CachetaEngineCallbacks {
     onHandReordered?: (newOrder: string[]) => void; 
     onDrawCard?: (fromDiscard: boolean) => void;
     onDiscardCard?: (cardStr: string) => void;
+    onShowPeeker?: (cardStr: string) => void;
 }
 
 export class CachetaPixiEngine {
@@ -49,7 +50,6 @@ export class CachetaPixiEngine {
 
     public heroCardData: { str: string, sprite: PIXI.Container }[] = [];
     
-    // 👇 CONTROLE CORRIGIDO PARA IDENTIFICAR A CARTA EXATA CLICADA (MEMÓRIA) 👇
     public selectedCardStr: string | null = null;
     public selectedCardContainer: PIXI.Container | null = null;
 
@@ -84,9 +84,11 @@ export class CachetaPixiEngine {
     private lastDropY: number = 0;
     private isPeeking: boolean = false;
 
+    public pendingPeekCard: { sprite: PIXI.Container, finalX: number, finalY: number, scale: number } | null = null;
+
     private warningCardSprite: PIXI.Container | null = null;
     private warningTime: number = 0;
-    private hasFiredTimeout: boolean = false; // Controle de timeout fallback
+    private hasFiredTimeout: boolean = false; 
 
     private previousHeroCards: string[] = [];
     private previousDiscardPile: string[] = [];
@@ -189,25 +191,14 @@ export class CachetaPixiEngine {
         this.monteBtnOverlay.eventMode = 'static';
         this.monteBtnOverlay.cursor = 'pointer';
 
-
-        this.monteBtnOverlay.circle(0, 0, 45);
-        this.monteBtnOverlay.fill({ color: 0x000000, alpha: 0.01 }); 
-        this.monteBtnOverlay.x = this.MONTE_X;
-        this.monteBtnOverlay.y = this.MONTE_Y;
-        this.monteBtnOverlay.eventMode = 'static';
-        this.monteBtnOverlay.cursor = 'pointer';
-        
-
         this.monteBtnOverlay.on('pointerdown', (e) => {
             if (this.activeTimerSeat === 0 && this.gameState.phase === 'betting') {
                 const hero = this.gameState.players[0];
                 if (hero && hero.hasDrawnThisTurn) return;
 
-                // Salva a posição exata do clique
                 this.deckDragStartX = e.global.x;
                 this.deckDragStartY = e.global.y;
                 
-                // Cria a carta falsa para arrastar
                 this.deckDragSprite = this.deckInstance!.createCardToDeal(false, "A", "♠");
                 this.deckDragSprite.scale.set(1.75);
                 this.deckDragSprite.x = this.MONTE_X;
@@ -218,9 +209,6 @@ export class CachetaPixiEngine {
         });
         
         this.mainLayer.addChild(this.monteBtnOverlay);
-
-
-
 
         this.mainLayer.addChild(this.lixoBtnOverlay);
         
@@ -354,7 +342,6 @@ export class CachetaPixiEngine {
         this.previousDiscardPile = [];
         this.lastTurnSeat = -1;
 
-        // Limpa seleção
         this.selectedCardContainer = null;
         this.selectedCardStr = null;
 
@@ -642,7 +629,6 @@ export class CachetaPixiEngine {
                 newHeroCardData.push(cardData);
                 const finalX = target.x + startOffset + positions[index];
                 
-                // 👇 COMPARAÇÃO DIRETA PELO CONTAINER (Identifica duplicatas corretamente) 👇
                 const isSelected = (this.selectedCardContainer === cardData.sprite);
                 const finalY = isSelected ? targetY - 25 : targetY;
 
@@ -664,6 +650,44 @@ export class CachetaPixiEngine {
         });
 
         this.setupAllDragEvents();
+    }
+
+    // 👇 MÉTODO CORRIGIDO: Agora a animação de esconder e voar para o leque é garantida! 👇
+    public finishPeekerAnimation() {
+        if (this.pendingPeekCard) {
+            const { sprite, finalX, finalY, scale } = this.pendingPeekCard;
+            
+            // Garante que o Sprite vai para a camada principal e fica visível
+            if (this.cardLayer && sprite) {
+                this.cardLayer.addChild(sprite); 
+            }
+            sprite.visible = true; 
+            
+            // Anima apenas o X, Y e Rotação
+            gsap.to(sprite, {
+                x: finalX,
+                y: finalY,
+                rotation: 0,
+                duration: 0.5,
+                ease: "back.out(1.1)",
+                onComplete: () => {
+                    this.sortHeroHand(); 
+                }
+            });
+
+            // Anima a escala DE FORMA SEPARADA (Evita bugs do GSAP com objetos PixiJS v8)
+            gsap.to(sprite.scale, {
+                x: scale,
+                y: scale,
+                duration: 0.5,
+                ease: "back.out(1.1)"
+            });
+            
+            this.pendingPeekCard = null;
+        } else {
+            // Se der qualquer erro e o pendente sumir, apenas reordena a mão
+            this.sortHeroHand();
+        }
     }
 
     public syncBoard() {
@@ -698,21 +722,18 @@ export class CachetaPixiEngine {
 
         if (this.isDealingCardsAnimationRunning) return;
         
-        // 👇 CORREÇÃO: Força a atualização se o tempo acabar enquanto estiver arrastando 👇
         if (this.draggingCardSprite) {
             const hero = this.gameState.players.find((p: any) => p.isHero);
             
-            // Se o servidor passou a vez (não é mais o nosso turno), aborta o arrasto!
             if (this.gameState.currentTurnSeat !== hero?.seat) {
                 this.draggingCardSprite = null;
                 this.draggingLogicalIndex = -1;
             } else {
-                return; // Se ainda é nossa vez, continua ignorando para o arrasto ser fluído
+                return; 
             }
         }
 
         const allCards = [...this.cardLayer.children];
-
 
         allCards.forEach(card => {
             this.safeDestroy(card as PIXI.Container);
@@ -833,89 +854,60 @@ export class CachetaPixiEngine {
                     const finalX = target.x + startOffset + (positions[c] || 0);
                     const finalY = targetY;
 
-
                     const isNewCard = isDrawing && (c === cardsToRender.length - 1);
 
-if (isNewCard) {
-                    const cameFromLixo = this.previousDiscardPile.includes(cardStr);
-                    
-                    this.selectedCardContainer = cardSprite;
-                    this.selectedCardStr = cardStr;
-                    if (this.callbacks.onCardSelected) this.callbacks.onCardSelected(this.selectedCardStr);
-                    
-                    const liftedY = targetY - 25;
-                    
-                    if (!cameFromLixo && this.isPeeking) {
-                        // 👇 MÁGICA DO FILAR 👇
-                        this.isPeeking = false; 
-                        cardSprite.visible = false; 
+                    if (isNewCard) {
+                        const cameFromLixo = this.previousDiscardPile.includes(cardStr);
                         
-                        const faceDownCard = this.deckInstance.createCardToDeal(false, "A", "♠");
-                        faceDownCard.scale.set(this.CENTER_CARDS_SCALE);
-                        faceDownCard.x = this.MONTE_X;
-                        faceDownCard.y = this.MONTE_Y;
-                        this.mainLayer.addChild(faceDownCard);
-
-                        const peekY = this.MONTE_Y + 110; 
+                        this.selectedCardContainer = cardSprite;
+                        this.selectedCardStr = cardStr;
+                        if (this.callbacks.onCardSelected) this.callbacks.onCardSelected(this.selectedCardStr);
                         
-                        gsap.to(faceDownCard, { y: peekY, duration: 0.25, ease: "power2.out", onComplete: () => {
-                            let isShrinking = true;
-                            const flipAnim = () => {
-                                if (!this.app || !this.app.ticker) return;
-                                if (isShrinking) {
-                                    faceDownCard.scale.x -= 0.15;
-                                    if (faceDownCard.scale.x <= 0) {
-                                        isShrinking = false;
-                                        cardSprite.x = faceDownCard.x;
-                                        cardSprite.y = faceDownCard.y;
-                                        cardSprite.scale.x = 0;
-                                        cardSprite.scale.y = this.CENTER_CARDS_SCALE; // Mantém tamanho do monte
-                                        cardSprite.visible = true; 
-                                        this.safeDestroy(faceDownCard);
-
-                                        const growAnim = () => {
-                                            if (!this.app || !this.app.ticker) return;
-                                            cardSprite.scale.x += 0.15;
-                                            if (cardSprite.scale.x >= this.CENTER_CARDS_SCALE) {
-                                                cardSprite.scale.x = this.CENTER_CARDS_SCALE;
-                                                this.app.ticker.remove(growAnim);
-
-                                                // Suspense e voa pro leque diminuindo a escala
-                                                gsap.to(cardSprite, { x: finalX, y: liftedY, scale: layout.scale, duration: 0.35, ease: "back.out(1.2)", delay: 0.6 });
-                                            }
-                                        };
-                                        this.app.ticker.remove(flipAnim);
-                                        this.app.ticker.add(growAnim);
-                                    }
-                                }
+                        const liftedY = targetY - 25;
+                        
+                        if (!cameFromLixo && this.isPeeking) {
+                            this.isPeeking = false; 
+                            cardSprite.visible = false; 
+                            
+                            if (this.callbacks.onShowPeeker) {
+                                this.callbacks.onShowPeeker(cardStr);
+                            }
+                            
+                            // 👇 CORRIGIDO: Posição calculada exatamente no meio da mesa e escondida 👇
+                            const peekX = (this.app?.screen.width || window.innerWidth) / 2;
+                            const peekY = 495; // Fica exatamente no meio visual
+                            
+                            cardSprite.x = peekX;
+                            cardSprite.y = peekY;
+                            cardSprite.scale.set(this.CENTER_CARDS_SCALE * 1.8);
+                            
+                            this.pendingPeekCard = {
+                                sprite: cardSprite,
+                                finalX: finalX,
+                                finalY: liftedY,
+                                scale: layout.scale
                             };
-                            if (this.app) this.app.ticker.add(flipAnim);
-                        }});
 
-                    } else {
-                        // 👇 MÁGICA DA CONTINUAÇÃO DO ARRASTO OU SAQUE DO LIXO 👇
-                        // Se não veio do lixo, a carta começa exatamente onde o dedo do usuário soltou!
-                        cardSprite.x = cameFromLixo ? this.LIXO_X : (this.lastDropX || this.MONTE_X);
-                        cardSprite.y = cameFromLixo ? this.LIXO_Y : (this.lastDropY || this.MONTE_Y);
-                        cardSprite.scale.set(this.CENTER_CARDS_SCALE); // Mantém o tamanho do monte no inicio do voo
+                        } else {
+                            cardSprite.x = cameFromLixo ? this.LIXO_X : (this.lastDropX || this.MONTE_X);
+                            cardSprite.y = cameFromLixo ? this.LIXO_Y : (this.lastDropY || this.MONTE_Y);
+                            cardSprite.scale.set(this.CENTER_CARDS_SCALE); 
+                            
+                            cardSprite.rotation = cameFromLixo ? 0 : ((cardSprite.x - this.MONTE_X) * 0.03) * (Math.PI / 180);
+
+                            this.lastDropX = 0;
+                            this.lastDropY = 0;
+
+                            const tl = gsap.timeline();
+                            tl.to(cardSprite, { x: finalX, y: targetY + 60, scale: layout.scale * 1.1, rotation: 0, duration: 0.25, ease: "power2.out" })
+                              .to(cardSprite, { y: liftedY, scale: layout.scale, duration: 0.2, ease: "back.out(1.2)" });
+                        }
                         
-                        // Mantém a inclinação realista que o drag gerou
-                        cardSprite.rotation = cameFromLixo ? 0 : ((cardSprite.x - this.MONTE_X) * 0.03) * (Math.PI / 180);
-
-                        this.lastDropX = 0;
-                        this.lastDropY = 0;
-
-                        const tl = gsap.timeline();
-                        // Anima para o leque corrigindo escala e rotação perfeitamente!
-                        tl.to(cardSprite, { x: finalX, y: targetY + 60, scale: layout.scale * 1.1, rotation: 0, duration: 0.25, ease: "power2.out" })
-                          .to(cardSprite, { y: liftedY, scale: layout.scale, duration: 0.2, ease: "back.out(1.2)" });
+                    } else {
+                        cardSprite.scale.set(layout.scale);
+                        cardSprite.x = finalX;
+                        cardSprite.y = finalY;
                     }
-                    
-                } else {
-                    cardSprite.scale.set(layout.scale);
-                    cardSprite.x = finalX;
-                    cardSprite.y = finalY;
-                }
 
                     this.heroCardData.push({ str: cardStr, sprite: cardSprite });
                     this.cardLayer.addChild(cardSprite);
@@ -982,11 +974,9 @@ if (isNewCard) {
             const dx = event.global.x - this.deckDragStartX;
             const dy = event.global.y - this.deckDragStartY;
             
-            // Permite arrastar livremente (X e Y)
             this.deckDragSprite.x = this.MONTE_X + dx;
             this.deckDragSprite.y = this.MONTE_Y + dy;
             
-            // Gira a carta levemente com base no X, dando um efeito super realista de estar "pendurada"
             this.deckDragSprite.rotation = (dx * 0.03) * (Math.PI / 180);
             return;
         }
@@ -1025,9 +1015,7 @@ if (isNewCard) {
             this.heroCardData.splice(closestIndex, 0, draggedData);
 
             if (this.selectedCardContainer === this.draggingCardSprite) {
-                // Mantém selecionado em drag
             } else if (this.selectedCardContainer === this.heroCardData[this.draggingLogicalIndex].sprite) {
-                // Ignora mudança de selection
             }
 
             this.heroCardData.forEach((c, idx) => {
@@ -1050,33 +1038,29 @@ if (isNewCard) {
             const dropX = this.deckDragSprite.x;
             const dropY = this.deckDragSprite.y;
             
-            // Calcula o quanto o dedo se moveu
             const dx = event.global.x - this.deckDragStartX;
             const dy = event.global.y - this.deckDragStartY;
             const dist = Math.sqrt(dx*dx + dy*dy);
 
             const targetY = (this.seatCoords[0]?.y || 0) - 115;
-            const THRESHOLD_Y = targetY - 80; // Linha de aproximação do leque
+            const THRESHOLD_Y = targetY - 60; 
 
-            if (dist < 10) {
-                // CLIQUE SIMPLES: Distância do dedo foi muito curta -> Filar!
+            if (dist < 15) { 
                 this.safeDestroy(this.deckDragSprite);
                 this.deckDragSprite = null;
                 this.isPeeking = true;
                 if (this.callbacks.onDrawCard) this.callbacks.onDrawCard(false);
 
             } else if (dropY >= THRESHOLD_Y) {
-                // ARRASTOU COM SUCESSO: Passou da linha imaginária -> Compra direta!
                 this.lastDropX = dropX;
                 this.lastDropY = dropY;
                 
                 this.safeDestroy(this.deckDragSprite);
                 this.deckDragSprite = null;
-                this.isPeeking = false;
+                this.isPeeking = false; 
                 if (this.callbacks.onDrawCard) this.callbacks.onDrawCard(false);
 
             } else {
-                // DESISTIU: Arrastou mas soltou antes de chegar na mão -> Retorna ao monte
                 const sprite = this.deckDragSprite;
                 this.deckDragSprite = null;
                 gsap.to(sprite, {
@@ -1372,7 +1356,7 @@ if (isNewCard) {
         }
     }
 
-private updateFramePixi() {
+    private updateFramePixi() {
         if (!this.app) return;
         
         if (this.tableInfoTextUI) {
@@ -1408,23 +1392,21 @@ private updateFramePixi() {
             seatUi.updateTimer(0, 0);
             this.resetWarningCard();
 
-            // 👇 SISTEMA ANTI-ZOMBIE (Auto Descarte no Frontend se o Backend falhar) 👇
             if (timeLeft < -1500 && !this.hasFiredTimeout) {
                 this.hasFiredTimeout = true;
                 const hero = this.gameState.players.find((p: any) => p.isHero);
                 if (hero && hero.seat === this.activeTimerSeat && this.gameState.phase === 'betting') {
                     
-                    // Aborta o arrasto para liberar a carta para o descarte automático
                     if (this.draggingCardSprite) {
                         this.draggingCardSprite = null;
                         this.draggingLogicalIndex = -1;
                     }
                     
                     if (!hero.hasDrawnThisTurn && this.callbacks.onDrawCard) {
-                        this.callbacks.onDrawCard(false); // Puxa do monte
+                        this.callbacks.onDrawCard(false); 
                         setTimeout(() => {
                             if (this.callbacks.onDiscardCard && this.heroCardData.length > 0) {
-                                this.callbacks.onDiscardCard(this.heroCardData[this.heroCardData.length - 1].str); // Descarta a última
+                                this.callbacks.onDiscardCard(this.heroCardData[this.heroCardData.length - 1].str); 
                             }
                         }, 800);
                     } else if (this.callbacks.onDiscardCard && this.heroCardData.length > 0) {
@@ -1440,7 +1422,6 @@ private updateFramePixi() {
 
         seatUi.updateTimer(progress, secLeft);
 
-        // 👇 NOVO: Limite dinâmico (25%) e folga de 500ms para a animação estabilizar antes de piscar
         const thresholdMs = (this.TIMER_DURATION_SEC * 1000) * 0.25;
         const blinkMs = thresholdMs - 500;
 

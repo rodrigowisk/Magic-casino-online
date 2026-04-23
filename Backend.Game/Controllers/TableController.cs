@@ -1,6 +1,7 @@
 ﻿using Backend.Game.Data;
 using Backend.Game.DTOs;
 using Backend.Game.Models;
+using Backend.Game.Services; // 👇 IMPORTANTE: Adicionado para usar o GameManager
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -13,10 +14,12 @@ namespace Backend.Game.Controllers;
 public class TableController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly GameManager _gameManager; // 👇 NOVO: Injetando o GameManager
 
-    public TableController(AppDbContext context)
+    public TableController(AppDbContext context, GameManager gameManager) // 👇 NOVO: Construtor atualizado
     {
         _context = context;
+        _gameManager = gameManager;
     }
 
     [HttpGet]
@@ -24,25 +27,29 @@ public class TableController : ControllerBase
     {
         var now = DateTime.UtcNow;
 
-        var tables = await _context.GameTables
+        // 1. Busca as mesas ativas do banco de dados primeiro
+        var tablesDb = await _context.GameTables
             // 👇 MÁGICA: Agora filtra também apenas as mesas do tipo "meinho" 👇
             .Where(t => t.IsActive && t.CreatedAt.AddHours(t.DurationHours) > now && t.GameType == "meinho")
             .OrderByDescending(t => t.CreatedAt)
-            .Select(t => new TableResponseDto
-            {
-                Id = t.Id,
-                Name = t.Name,
-                Ante = t.Ante,
-                MaxPlayers = t.MaxPlayers,
-                CurrentPlayers = t.CurrentPlayers,
-                Rake = t.Rake,
-                MinBuyIn = t.MinBuyIn,
-                DurationHours = t.DurationHours,
-                GameType = t.GameType, // 👇 Retorna o tipo de jogo para o frontend
-                HasPassword = !string.IsNullOrEmpty(t.PasswordHash),
-                CoverImage = t.CoverImage // 👇 NOVIDADE: Retorna a imagem da capa para o frontend mostrar no Lobby
-            })
-            .ToListAsync();
+            .ToListAsync(); // Traz para a memória do servidor
+
+        // 2. Mapeia para o DTO pegando a contagem REAL da memória do SignalR
+        var tables = tablesDb.Select(t => new TableResponseDto
+        {
+            Id = t.Id,
+            Name = t.Name,
+            Ante = t.Ante,
+            MaxPlayers = t.MaxPlayers,
+            // 👇 A MÁGICA ACONTECE AQUI: Consulta a memória viva (RAM) do GameManager!
+            CurrentPlayers = _gameManager.GetSeatedPlayerCount(t.Id.ToString()),
+            Rake = t.Rake,
+            MinBuyIn = t.MinBuyIn,
+            DurationHours = t.DurationHours,
+            GameType = t.GameType, // 👇 Retorna o tipo de jogo para o frontend
+            HasPassword = !string.IsNullOrEmpty(t.PasswordHash),
+            CoverImage = t.CoverImage // 👇 NOVIDADE: Retorna a imagem da capa para o frontend mostrar no Lobby
+        }).ToList();
 
         return Ok(tables);
     }
@@ -95,9 +102,11 @@ public class TableController : ControllerBase
         if (string.IsNullOrEmpty(table.PasswordHash))
             return Ok(new { success = true });
 
+        // 👇 CORREÇÃO CRÍTICA AQUI 👇
+        // Trocamos o 'Unauthorized' (401) por 'BadRequest' (400) para não deslogar o usuário!
         if (string.IsNullOrEmpty(request.Password) || !BCrypt.Net.BCrypt.Verify(request.Password, table.PasswordHash))
         {
-            return Unauthorized(new { message = "Senha incorreta!" });
+            return BadRequest(new { message = "Senha incorreta!" });
         }
 
         return Ok(new { success = true });

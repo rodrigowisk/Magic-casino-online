@@ -37,6 +37,9 @@ public class PlayerState
     public int Seat { get; set; } = -1;
     public decimal Chips { get; set; } = 0;
 
+    // 👇 NOVO: Segura as fichas recarregadas durante a mão ativa
+    public decimal PendingRebuy { get; set; } = 0;
+
     public decimal TotalBuyIn { get; set; } = 0;
     public decimal TotalCashOut { get; set; } = 0;
     public DateTime LastActiveAt { get; set; } = DateTime.UtcNow;
@@ -48,6 +51,6 @@ public class PlayerState
     public bool LeaveNextHand { get; set; } = false;
     public List<string> Cards { get; set; } = new();
 
-    // 🔥 NOVO: Contador de vezes seguidas que o tempo estourou 🔥
+    // 🔥 Contador de vezes seguidas que o tempo estourou
     public int MissedTurns { get; set; } = 0;
 }

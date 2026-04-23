@@ -69,6 +69,12 @@
         </div>
       </div>
 
+      <CachetaPeeker 
+        v-if="showPeeker" 
+        :card="peekerCardStr" 
+        @close="onPeekerClose" 
+      />
+
       <BuyInModal 
         v-if="showBuyInModal"
         :minBet="gameState.minBet"
@@ -136,6 +142,8 @@ import RebuyModal from '../../components/Meinho/RebuyModal.vue';
 import MeinhoMenu from '../../components/Meinho/MeinhoMenu.vue';
 import HandHistoryModal from '../../components/Meinho/HandHistoryModal.vue'; 
 import TableStatsModal from '../../components/Meinho/TableStatsModal.vue'; 
+// 👇 IMPORTANDO O PEEKER 3D DA CACHETA 👇
+import CachetaPeeker from '../../components/Cacheta/CachetaPeeker.vue'; 
 
 import deckImg from '../../assets/imagens/deck.webp';
 import tableImgAsset from '../../assets/imagens/table-decks1.webp';
@@ -180,6 +188,10 @@ const isAnimating = ref(false);
 let pendingState: any = null;
 
 const pixiContainer = ref<HTMLElement | null>(null);
+
+// 👇 ESTADOS DO PEEKER 3D 👇
+const showPeeker = ref(false);
+const peekerCardStr = ref("");
 
 const avatarImages: Record<string, string> = import.meta.glob('../../assets/imagens/avatars/**/*.webp', { eager: true, import: 'default' });
 
@@ -337,6 +349,14 @@ function handleRebuyCancel() {
     invokeStandUp(); 
 }
 
+// 👇 FUNÇÃO DE RETORNO DO PEEKER 👇
+const onPeekerClose = () => {
+    showPeeker.value = false; // Tira o Peeker da tela
+    if (engine) {
+        engine.finishPeekerAnimation(); // Faz o PixiJS animar a carta pra mão
+    }
+};
+
 const engine = new CachetaPixiEngine(gameState, {
     setDealing: (v) => isDealing.value = v,
     setAnimating: (v) => isAnimating.value = v,
@@ -349,7 +369,7 @@ const engine = new CachetaPixiEngine(gameState, {
         cachetaHub.reorderHand(newOrder);
     },
 
-sitDown: async (visualSeatIndex: number) => {
+    sitDown: async (visualSeatIndex: number) => {
         if (gameState.players.some(p => p.isHero && p.isSeated)) return;
         
         const logicalSeat = (visualSeatIndex + myLogicalSeatOffset.value) % (gameState.maxPlayers || 6);
@@ -370,15 +390,19 @@ sitDown: async (visualSeatIndex: number) => {
 
         pendingSitSeat.value = logicalSeat;
         showBuyInModal.value = true;
-    }, // 👇 NÃO ESQUEÇA ESTA VÍRGULA AQUI! 👇
+    }, 
 
-    // 👇 AS DUAS FUNÇÕES NOVAS QUE LIGAM A TELA AO SERVIDOR 👇
     onDrawCard: (fromDiscard: boolean) => {
         cachetaHub.drawCard(fromDiscard);
     },
     onDiscardCard: (cardStr: string) => {
         cachetaHub.discardCard(cardStr);
-        selectedCardToDiscard.value = null; // Limpa a UI após descartar
+        selectedCardToDiscard.value = null; 
+    },
+    // 👇 NOVO CALLBACK DO PIXIJS PARA O VUE 👇
+    onShowPeeker: (cardStr: string) => {
+        peekerCardStr.value = cardStr; // Ex: "A♠"
+        showPeeker.value = true; // Mostra o Peeker 3D
     }
 });
 
@@ -424,7 +448,6 @@ function applyState(serverState: any) {
       let tCashOut = Number(p.totalCashOut ?? p.TotalCashOut ?? 0);
       let tLastChips = Number(p.lastChips ?? p.LastChips ?? 0);
 
-      // 👇 TRAVA DE MEMÓRIA VISUAL: Impede o backend de esmagar sua organização manual 👇
       let sCards = p.cards || p.Cards || [];
       if (currentUserId && (String(p.userId) === currentUserId || String(p.UserId) === currentUserId)) {
           const existingHero = gameState.players.find((ep: any) => ep.userId === currentUserId);
@@ -433,7 +456,7 @@ function applyState(serverState: any) {
               const newSorted = [...sCards].sort().join(',');
               
               if (oldSorted === newSorted && oldSorted.length > 0) {
-                  sCards = [...existingHero.serverCards]; // Copia do jeito exato que estava antes
+                  sCards = [...existingHero.serverCards]; 
               }
           }
       }
@@ -448,7 +471,7 @@ function applyState(serverState: any) {
           totalBuyIn: tBuyIn,
           totalCashOut: tCashOut,
           lastChips: tLastChips,
-          cards: sCards, // Usa as cartas arrumadas ou as que vieram mesmo
+          cards: sCards, 
           status: String(p.status || p.Status || 'waiting').toLowerCase(),
           avatar: String(p.avatar || p.Avatar || 'default.webp'),
           hasDrawnThisTurn: !!(p.hasDrawnThisTurn || p.HasDrawnThisTurn),
@@ -664,10 +687,12 @@ function cancelLeaveNextHand() {
     if (cachetaHub.setLeaveNextHand) cachetaHub.setLeaveNextHand(false); 
 }
 
+// 👇 ROTA CORRIGIDA PARA O LOBBY GENÉRICO 👇
 function handleLobby() {
     showMenuModal.value = false;
-    router.push('/lobby-cacheta');
+    router.push('/lobby');
 }
+
 function handleMenuRules() { showMenuModal.value = false; }
 function handleMenuSettings() { showMenuModal.value = false; }
 

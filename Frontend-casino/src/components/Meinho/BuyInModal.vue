@@ -116,8 +116,9 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   width: 430px;
-  height: 900px;
+  height: 900px; /* ✅ CORRIGIDO PARA O TAMANHO DO JOGO */
   background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(5px); /* ✅ Adicionado desfoque no fundo */
   z-index: 500;
   display: flex;
   justify-content: center;

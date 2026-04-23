@@ -7,6 +7,7 @@ export interface GameHubCallbacks {
     onWalletBalanceUpdated?: (newBalance: number) => void; 
     onPlayerSatDown?: (logicalSeat: number) => void; 
     onPlayerStoodUp?: (logicalSeat: number) => void; 
+    onReceiveError?: (msg: string) => void; 
 }
 
 export function useGameHub(
@@ -24,7 +25,9 @@ export function useGameHub(
             
             hubConnection = new signalR.HubConnectionBuilder()
                 .withUrl(`${GAME_API_URL}/hubs/game`, {
-                    accessTokenFactory: () => localStorage.getItem('magic_token') || ''
+                    accessTokenFactory: () => localStorage.getItem('magic_token') || '',
+                    skipNegotiation: true,
+                    transport: signalR.HttpTransportType.WebSockets
                 })
                 .withAutomaticReconnect()
                 .build();
@@ -46,14 +49,12 @@ export function useGameHub(
                 callbacks.onPlayerBetted(logicalSeat, betAmount, isWin, potBroken, playedCards, centerCardRevealed);
             });
 
-            // Mapeando a atualização de saldo
             hubConnection.on("WalletBalanceUpdated", (newBalance: number) => {
                 if (callbacks.onWalletBalanceUpdated) {
                     callbacks.onWalletBalanceUpdated(newBalance);
                 }
             });
 
-            // Mapeando os Gatilhos de Efeitos Visuais (Relâmpago e Bomba de Fumo)
             hubConnection.on("PlayerSatDown", (logicalSeat: number) => {
                 if (callbacks.onPlayerSatDown) {
                     callbacks.onPlayerSatDown(logicalSeat);
@@ -64,6 +65,22 @@ export function useGameHub(
                 if (callbacks.onPlayerStoodUp) {
                     callbacks.onPlayerStoodUp(logicalSeat);
                 }
+            });
+
+            hubConnection.on("ReceiveError", (msg: string) => {
+                if (callbacks.onReceiveError) {
+                    callbacks.onReceiveError(msg);
+                } else {
+                    console.error("Erro do Servidor:", msg);
+                }
+                // Fallback de segurança para garantir que a mensagem é lida
+                alert("Aviso do Servidor: " + msg); 
+            });
+
+            // 👇 A PEÇA QUE FALTAVA: Re-registrar o jogador no servidor após o Cloudflare cortar a ligação
+            hubConnection.onreconnected(async (connectionId) => {
+                console.log("SignalR reconectado com sucesso! Atualizando ID no servidor...");
+                await hubConnection?.invoke("JoinTable", tableId, currentUserId, currentUserName, currentUserAvatar);
             });
 
             await hubConnection.start();
@@ -83,60 +100,35 @@ export function useGameHub(
         return hubConnection?.connectionId;
     };
 
-    // --- AÇÕES DO JOGADOR ---
-
     const updateAvatar = async (newAvatar: string) => {
-        if (hubConnection) {
-            await hubConnection.invoke("UpdateAvatar", tableId, newAvatar);
-        }
+        if (hubConnection) await hubConnection.invoke("UpdateAvatar", tableId, newAvatar);
     };
 
     const sitDown = async (logicalSeat: number, buyIn: number) => {
-        if (hubConnection) {
-            await hubConnection.invoke("SitDown", tableId, logicalSeat, buyIn, currentUserId);
-        }
+        if (hubConnection) await hubConnection.invoke("SitDown", tableId, logicalSeat, buyIn, currentUserId);
     };
 
     const rebuy = async (amount: number) => {
-        if (hubConnection) {
-            await hubConnection.invoke("Rebuy", tableId, amount);
-        }
+        if (hubConnection) await hubConnection.invoke("Rebuy", tableId, amount);
     };
 
     const standUp = async () => {
-        if (hubConnection) {
-            await hubConnection.invoke("StandUp", tableId);
-        }
+        if (hubConnection) await hubConnection.invoke("StandUp", tableId);
     };
 
     const setLeaveNextHand = async (willLeave: boolean) => {
-        if (hubConnection) {
-            await hubConnection.invoke("SetLeaveNextHand", tableId, willLeave);
-        }
+        if (hubConnection) await hubConnection.invoke("SetLeaveNextHand", tableId, willLeave);
     };
 
     const skipBet = async () => {
-        if (hubConnection) {
-            await hubConnection.invoke("SkipBet", tableId, currentUserId);
-        }
+        if (hubConnection) await hubConnection.invoke("SkipBet", tableId, currentUserId);
     };
 
     const confirmBet = async (betValue: number) => {
-        if (hubConnection) {
-            await hubConnection.invoke("ConfirmBet", tableId, betValue, currentUserId);
-        }
+        if (hubConnection) await hubConnection.invoke("ConfirmBet", tableId, betValue, currentUserId);
     };
 
     return {
-        connect,
-        disconnect,
-        getConnectionId,
-        updateAvatar,
-        sitDown,
-        rebuy,
-        standUp,
-        setLeaveNextHand,
-        skipBet,
-        confirmBet
+        connect, disconnect, getConnectionId, updateAvatar, sitDown, rebuy, standUp, setLeaveNextHand, skipBet, confirmBet
     };
 }

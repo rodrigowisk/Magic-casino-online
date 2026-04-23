@@ -35,7 +35,7 @@ export class MeinhoBoardUI {
         neonGlow.fill({ color: 0x00f3ff, alpha: 0.8 }); 
         
         const blurFilter = new PIXI.BlurFilter();
-        blurFilter.blur = 60; 
+        blurFilter.strength = 60; 
         neonGlow.filters = [blurFilter];
         
         neonGlow.x = tableSprite.x;

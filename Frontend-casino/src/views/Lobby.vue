@@ -12,7 +12,7 @@
           <h3>Lobby Principal</h3>
           <span class="subtitle">Escolha seu jogo e divirta-se</span>
         </div>
-        <button class="btn-create" @click="abrirModalEscolha">Criar Mesa +</button>
+        <button v-if="isOwner" class="btn-create" @click="abrirModalEscolha">Criar Mesa +</button>
       </div>
 
       <div v-if="isLoading" class="loading-message">
@@ -75,7 +75,7 @@
           type="password" 
           v-model="tablePassword" 
           placeholder="Senha da mesa" 
-          @keyup.enter="verificarSenhaEEntrar" 
+          @keyup.enter.prevent="verificarSenhaEEntrar" 
           ref="passwordInput"
         />
         
@@ -109,6 +109,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import { authService } from '../services/authService'; 
+import * as signalR from '@microsoft/signalr'; 
 
 import Header from '../components/Header.vue'; 
 import BottomNav from '../components/BottomNav.vue'; 
@@ -116,15 +117,18 @@ import LobbyCarousel from '../components/LobbyCarousel.vue';
 
 const router = useRouter();
 
+const isOwner = ref(false);
+
 const isLoading = ref(true);
 const errorMessage = ref('');
 const processingId = ref<number | null>(null);
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+let lobbyHubConnection: signalR.HubConnection | null = null;
+
 const cachetaTablesRaw = ref<any[]>([]);
 const meinhoRoomsRaw = ref<any[]>([]);
 
-// Modais
 const showPasswordModal = ref(false);
 const showCreateChoice = ref(false);
 
@@ -136,6 +140,39 @@ const passwordInput = ref<HTMLInputElement | null>(null);
 
 const CACHETA_API_URL = import.meta.env.VITE_CACHETA_API_URL || 'https://cacheta.magic-casino.online';
 const MEINHO_API_URL = import.meta.env.VITE_GAME_API_URL || 'http://localhost:5002';
+
+const setupLobbySignalR = async () => {
+  const token = localStorage.getItem('magic_token');
+  
+  lobbyHubConnection = new signalR.HubConnectionBuilder()
+    .withUrl(`${MEINHO_API_URL}/hubs/game`, {
+      accessTokenFactory: () => token || ''
+    })
+    .withAutomaticReconnect()
+    .build();
+
+  lobbyHubConnection.on("LobbyTableUpdated", (hubTableId: string, newCount: number) => {
+    const mesaMeinho = meinhoRoomsRaw.value.find((m: any) => m.id === hubTableId || m.Id === hubTableId);
+    if (mesaMeinho) {
+      mesaMeinho.currentPlayers = newCount;
+      mesaMeinho.current_players = newCount;
+      mesaMeinho.CurrentPlayers = newCount;
+    }
+
+    const mesaCacheta = cachetaTablesRaw.value.find((m: any) => m.id === hubTableId || m.Id === hubTableId);
+    if (mesaCacheta) {
+      mesaCacheta.currentPlayers = newCount;
+      mesaCacheta.current_players = newCount;
+      mesaCacheta.CurrentPlayers = newCount;
+    }
+  });
+
+  try {
+    await lobbyHubConnection.start();
+  } catch (err) {
+    console.error("Erro ao conectar o SignalR no Lobby:", err);
+  }
+};
 
 const fetchAllGames = async () => {
   try {
@@ -191,8 +228,8 @@ const mappedCachetaTables = computed(() => {
       id: table.id,
       name: table.hasPassword ? `🔒 ${table.name}` : table.name,
       description: `Mesa de Cacheta. Ante: R$ ${table.ante} | Rake: ${table.rake}%`,
-      participantsCount: table.currentPlayers || table.current_players || 0,
-      maxParticipants: table.maxPlayers || table.max_players || 0,
+      participantsCount: table.currentPlayers || table.current_players || table.CurrentPlayers || 0,
+      maxParticipants: table.maxPlayers || table.max_players || table.MaxPlayers || 0,
       
       entryFee: table.ante || 0, 
       prizePool: table.minBuyIn || table.min_buyin || 0, 
@@ -205,7 +242,6 @@ const mappedCachetaTables = computed(() => {
       hasPassword: table.hasPassword,
       coverImage: table.coverImage || table.CoverImage || 'casino.webp',
       
-      // 👇 AQUI: Repassando o gameType para a cartinha
       gameType: table.gameType || table.game_type || 'CACHETA'
     };
   });
@@ -224,8 +260,8 @@ const mappedMeinhoRooms = computed(() => {
       id: mesa.id,
       name: mesa.hasPassword ? `🔒 ${mesa.name}` : mesa.name,
       description: `Mesa de Meinho. Rake: ${mesa.rake}% | Tempo: ${mesa.durationHours}h`,
-      participantsCount: mesa.currentPlayers || mesa.current_players || 0,
-      maxParticipants: mesa.maxPlayers || mesa.max_players || 0,
+      participantsCount: mesa.currentPlayers || mesa.current_players || mesa.CurrentPlayers || 0,
+      maxParticipants: mesa.maxPlayers || mesa.max_players || mesa.MaxPlayers || 0,
       
       entryFee: mesa.ante || 0, 
       prizePool: mesa.minBuyIn || mesa.min_buyin || 0, 
@@ -238,7 +274,6 @@ const mappedMeinhoRooms = computed(() => {
       hasPassword: mesa.hasPassword,
       coverImage: mesa.coverImage || mesa.CoverImage || 'casino.webp',
 
-      // 👇 AQUI: Repassando o gameType para a cartinha
       gameType: mesa.gameType || mesa.game_type || 'MEINHO'
     };
   });
@@ -254,13 +289,13 @@ const entrarNaCacheta = (roomId: number) => {
 
 const tentarEntrarNoMeinho = (roomId: number) => {
   const mesaOriginal = meinhoRoomsRaw.value.find(m => m.id === roomId);
-  
+   
   if (mesaOriginal && mesaOriginal.hasPassword) {
     selectedTableId.value = roomId.toString();
     tablePassword.value = '';
     passwordError.value = '';
     showPasswordModal.value = true;
-    
+     
     nextTick(() => {
       if (passwordInput.value) passwordInput.value.focus();
     });
@@ -301,20 +336,21 @@ const verificarSenhaEEntrar = async () => {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.message || 'Senha incorreta!');
+      passwordError.value = errorData.message || 'Senha incorreta!';
+      isVerifying.value = false;
+      return; 
     }
 
     showPasswordModal.value = false;
     router.push(`/mesa/${selectedTableId.value}`);
 
-  } catch (error: any) {
-    passwordError.value = error.message;
-  } finally {
-    isVerifying.value = false;
-  }
+    } catch (error: any) {
+      passwordError.value = 'Falha na conexão. Verifique sua rede.';
+    } finally {
+      isVerifying.value = false;
+    }
 };
 
-// Funções para criação de mesa
 const abrirModalEscolha = () => {
   showCreateChoice.value = true;
 };
@@ -333,15 +369,23 @@ onMounted(() => {
     router.push('/login');
     return;
   }
+
+  isOwner.value = authService.isAdmin();
   
   isLoading.value = true;
   fetchAllGames();
   
   pollInterval = setInterval(fetchAllGames, 5000); 
+
+  setupLobbySignalR();
 });
 
 onUnmounted(() => {
   if (pollInterval) clearInterval(pollInterval);
+
+  if (lobbyHubConnection) {
+    lobbyHubConnection.stop();
+  }
 });
 </script>
 
@@ -349,7 +393,7 @@ onUnmounted(() => {
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;900&display=swap');
 
 .screen-wrapper {
-  width: 100%; /* 🔥 CORREÇÃO: Mudado de 100vw para 100% para evitar scroll horizontal no Windows */
+  width: 100%; 
   height: 100vh;
   height: 100dvh; 
   display: flex;
@@ -358,7 +402,7 @@ onUnmounted(() => {
   background-image: radial-gradient(circle at 50% 50%, #151e32 0%, #0a0f18 100%);
   font-family: 'Montserrat', sans-serif;
   color: white;
-  overflow-x: hidden; /* 🔥 CORREÇÃO: Proíbe vazamento horizontal geral */
+  overflow-x: hidden;
 }
 
 .header-full-width {
@@ -374,7 +418,7 @@ onUnmounted(() => {
   margin: 0 auto; 
   padding: 10px; 
   overflow-y: auto; 
-  overflow-x: hidden; /* 🔥 CORREÇÃO: Impede que os carrosseis criem barra inferior */
+  overflow-x: hidden; 
   box-sizing: border-box;
   padding-bottom: 75px; 
 }

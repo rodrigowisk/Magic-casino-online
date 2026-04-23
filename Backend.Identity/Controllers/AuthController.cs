@@ -83,14 +83,19 @@ public class AuthController : ControllerBase
 
         if (!user.IsActive) return Forbid();
 
-        var token = GenerateJwtToken(user);
+        // 🔥 BUSCA AS ROLES DO USUÁRIO NO BANCO DE DADOS
+        var userRoleIds = await _context.UserRoles.Where(ur => ur.UserId == user.Id).Select(ur => ur.RoleId).ToListAsync();
+        var userRoles = await _context.Roles.Where(r => userRoleIds.Contains(r.Id)).Select(r => r.Name).ToListAsync();
+
+        var token = GenerateJwtToken(user, userRoles);
 
         return Ok(new
         {
             token,
             username = user.Username,
             userId = user.Id,
-            avatar = user.Avatar
+            avatar = user.Avatar,
+            roles = userRoles // 🔥 RETORNA AS ROLES PARA O VUE SALVAR NO LOCALSTORAGE
         });
     }
 
@@ -114,18 +119,24 @@ public class AuthController : ControllerBase
         return Ok(new { success = true, avatar = user.Avatar });
     }
 
-    private string GenerateJwtToken(User user)
+    private string GenerateJwtToken(User user, List<string> roles)
     {
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
             new Claim(JwtRegisteredClaimNames.Sub, user.Id.ToString()),
             new Claim(JwtRegisteredClaimNames.Email, user.Email),
             new Claim("username", user.Username),
             new Claim("avatar", user.Avatar)
         };
+
+        // 🔥 INJETA CADA ROLE DO USUÁRIO DENTRO DO TOKEN JWT
+        foreach (var role in roles)
+        {
+            claims.Add(new Claim(ClaimTypes.Role, role));
+        }
 
         var token = new JwtSecurityToken(
             issuer: _configuration["Jwt:Issuer"],
@@ -137,4 +148,5 @@ public class AuthController : ControllerBase
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
+
 }

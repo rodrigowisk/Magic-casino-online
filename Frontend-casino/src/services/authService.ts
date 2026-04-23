@@ -50,6 +50,13 @@ export const authService = {
     if (returnedId) {
        localStorage.setItem('magic_userid', returnedId);
     }
+
+    // 👇 NOVO: Salva as Roles (Permissões) centralizadas aqui no Service
+    if (data.roles) {
+      localStorage.setItem('magic_roles', JSON.stringify(data.roles));
+    } else {
+      localStorage.setItem('magic_roles', JSON.stringify([]));
+    }
     
     return data;
   },
@@ -59,6 +66,8 @@ export const authService = {
     localStorage.removeItem('magic_username');
     localStorage.removeItem('magic_userid');
     localStorage.removeItem('magic_avatar'); // Limpa o avatar no logout
+    // 👇 NOVO E CRÍTICO: Limpa as permissões no logout para não vazar acesso!
+    localStorage.removeItem('magic_roles'); 
   },
 
   isAuthenticated() {
@@ -80,5 +89,16 @@ export const authService = {
   // Getter para o avatar
   getAvatar() {
     return localStorage.getItem('magic_avatar') || 'default.webp';
+  },
+
+  // 👇 NOVOS GETTERS PARA FACILITAR A VIDA NO FRONTEND 👇
+  getRoles() {
+    const rolesStr = localStorage.getItem('magic_roles');
+    return rolesStr ? JSON.parse(rolesStr) : [];
+  },
+
+  isAdmin() {
+    const roles = this.getRoles();
+    return roles.includes('Owner') || roles.includes('Admin');
   }
 };
