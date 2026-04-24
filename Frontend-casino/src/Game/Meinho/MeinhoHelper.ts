@@ -40,10 +40,15 @@ export class MeinhoHelper {
     }
 
     public static getBetTarget(pX: number, pY: number, targetPotX: number, targetPotY: number) {
-        const dx = targetPotX - pX;
-        const dy = targetPotY - pY;
+        const centroMesaX = 215;
+        const centroMesaY = 420;
+
+        const dx = centroMesaX - pX;
+        const dy = centroMesaY - pY;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        const betDistance = 75; 
+        
+        // 👇 Distância cravada em 90 para todos os jogadores
+        const betDistance = 90; 
         
         let betX = pX;
         let betY = pY;
