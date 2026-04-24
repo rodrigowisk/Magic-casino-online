@@ -51,6 +51,107 @@ public class GameManager
         return 0;
     }
 
+    public bool JoinWaitlist(string tableId, string userId, string userName)
+    {
+        var table = GetOrCreateTable(tableId);
+        lock (table.Players)
+        {
+            if (table.Waitlist == null) table.Waitlist = new List<WaitlistEntry>();
+            if (!table.Waitlist.Any(w => w.UserId == userId))
+            {
+                table.Waitlist.Add(new WaitlistEntry { UserId = userId, Name = userName });
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public bool LeaveWaitlist(string tableId, string userId)
+    {
+        var table = GetOrCreateTable(tableId);
+        bool callNext = false;
+
+        lock (table.Players)
+        {
+            if (table.Waitlist != null)
+            {
+                table.Waitlist.RemoveAll(w => w.UserId == userId);
+            }
+
+            if (table.ReservedForUserId == userId)
+            {
+                table.ReservedForUserId = null;
+                callNext = true;
+            }
+        }
+
+        // 👇 CORREÇÃO: Avisa a todos que a fila andou, independentemente de chamar o próximo ou não
+        var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+        _ = hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+
+        if (callNext)
+        {
+            _ = CheckAndProcessWaitlistAsync(tableId);
+        }
+
+        return true;
+    }
+
+    public async Task CheckAndProcessWaitlistAsync(string tableId)
+    {
+        var table = GetOrCreateTable(tableId);
+        string? userToNotify = null;
+
+        lock (table.Players)
+        {
+            if (table.Players.Count(p => p.IsSeated) >= table.MaxPlayers) return;
+            if (!string.IsNullOrEmpty(table.ReservedForUserId)) return;
+            if (table.Waitlist == null || !table.Waitlist.Any()) return;
+
+            // 👇 CORREÇÃO CRÍTICA: Pegamos o nome, mas NÃO REMOVEMOS ELE DA FILA AINDA!
+            // Ele fica visível como 1º da fila para todo mundo ver até que ele sente.
+            userToNotify = table.Waitlist[0].UserId;
+            table.ReservedForUserId = userToNotify;
+        }
+
+        if (userToNotify != null)
+        {
+            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+            await hubContext.Clients.Group($"user_{userToNotify}").SendAsync("WaitlistYourTurn", tableId);
+
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(15000);
+                bool expired = false;
+                lock (table.Players)
+                {
+                    if (table.ReservedForUserId == userToNotify)
+                    {
+                        table.ReservedForUserId = null;
+
+                        // 👇 Se o tempo de 15s dele esgotou e ele não clicou em nada, AÍ SIM ele sai da fila.
+                        if (table.Waitlist != null)
+                        {
+                            table.Waitlist.RemoveAll(w => w.UserId == userToNotify);
+                        }
+
+                        expired = true;
+                    }
+                }
+
+                if (expired)
+                {
+                    await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+                    await hubContext.Clients.Group($"user_{userToNotify}").SendAsync("WaitlistExpired", tableId);
+
+                    // Como a vaga dele expirou, chama o nº 2 da fila.
+                    await CheckAndProcessWaitlistAsync(tableId);
+                }
+            });
+        }
+    }
+
     private void CheckTimeouts(object? state)
     {
         foreach (var table in _tables.Values)
@@ -100,6 +201,7 @@ public class GameManager
                                 var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
                                 _ = hubCtx.Clients.Group(table.TableId).SendAsync("PlayerStoodUp", oldSeat);
                                 _ = hubCtx.Clients.Group(table.TableId).SendAsync("TableStateUpdated", table);
+                                _ = CheckAndProcessWaitlistAsync(table.TableId);
                             }
 
                             if (chipsToReturn > 0 && !string.IsNullOrEmpty(uId))
@@ -161,6 +263,7 @@ public class GameManager
         if (roundEnded)
         {
             List<Task> cashoutTasks = new List<Task>();
+            bool seatFreed = false;
 
             lock (resolvingState.Players)
             {
@@ -193,6 +296,7 @@ public class GameManager
                         if (oldSeat != -1)
                         {
                             _ = hubContext.Clients.Group(tableId).SendAsync("PlayerStoodUp", oldSeat);
+                            seatFreed = true;
                         }
 
                         if (refund > 0 && !string.IsNullOrEmpty(uId))
@@ -216,6 +320,8 @@ public class GameManager
             {
                 await Task.WhenAll(cashoutTasks);
             }
+
+            if (seatFreed) _ = CheckAndProcessWaitlistAsync(tableId);
 
             if (CheckAndStartGame(tableId))
             {
@@ -275,7 +381,8 @@ public class GameManager
                 MinBuyIn = minBuyIn,
                 MinBet = ante,
                 ExpiresAt = expiresAt,
-                Players = new List<PlayerState>()
+                Players = new List<PlayerState>(),
+                Waitlist = new List<WaitlistEntry>()
             });
         }
         return _tables[tableId];
@@ -324,6 +431,8 @@ public class GameManager
         decimal chipsToReturn = 0;
         string userId = string.Empty;
         bool cashoutNow = false;
+        bool freedReservation = false;
+        bool wasInWaitlist = false;
 
         TableState targetTable = null;
 
@@ -380,6 +489,18 @@ public class GameManager
                         }
                     }
 
+                    if (table.Waitlist != null && table.Waitlist.Any(w => w.UserId == player.UserId))
+                    {
+                        table.Waitlist.RemoveAll(w => w.UserId == player.UserId);
+                        wasInWaitlist = true;
+                    }
+
+                    if (table.ReservedForUserId == player.UserId)
+                    {
+                        table.ReservedForUserId = null;
+                        freedReservation = true;
+                    }
+
                     player.ConnectionId = string.Empty;
                     player.LastActiveAt = DateTime.UtcNow;
                     break;
@@ -387,11 +508,21 @@ public class GameManager
             }
         }
 
-        if (cashoutNow && targetTable != null && logicalSeat != -1)
+        if (targetTable != null)
         {
             var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-            _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("PlayerStoodUp", logicalSeat);
-            _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("TableStateUpdated", targetTable);
+
+            if (cashoutNow && logicalSeat != -1)
+            {
+                _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("PlayerStoodUp", logicalSeat);
+                _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("TableStateUpdated", targetTable);
+                _ = CheckAndProcessWaitlistAsync(targetTable.TableId);
+            }
+            else if (freedReservation || wasInWaitlist)
+            {
+                _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("TableStateUpdated", targetTable);
+                if (freedReservation) _ = CheckAndProcessWaitlistAsync(targetTable.TableId);
+            }
         }
 
         if (cashoutNow && chipsToReturn > 0 && !string.IsNullOrEmpty(userId) && !string.IsNullOrEmpty(tableId))
@@ -422,6 +553,11 @@ public class GameManager
 
                 player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
                 if (player == null || player.IsSeated) return false;
+
+                if (!string.IsNullOrEmpty(table.ReservedForUserId) && table.ReservedForUserId != player.UserId)
+                {
+                    return false;
+                }
             }
 
             var result = await _walletService.DeductBuyInAsync(player.UserId, buyIn, tableId);
@@ -459,20 +595,31 @@ public class GameManager
                 player.LeaveNextHand = false;
                 player.LastActiveAt = DateTime.UtcNow;
                 player.MissedTurns = 0;
+
+                if (table.ReservedForUserId == player.UserId)
+                {
+                    table.ReservedForUserId = null;
+                }
+
+                // 👇 AQUI o jogador é definitivamente removido da fila, pois sentou com sucesso!
+                if (table.Waitlist != null)
+                {
+                    table.Waitlist.RemoveAll(w => w.UserId == player.UserId);
+                }
             }
 
             _ = hubContext.Clients.Group(tableId).SendAsync("PlayerSatDown", seat);
 
-            // 👇 CORREÇÃO: Força a atualização da tela para todos, mesmo se o jogo não começar agora!
             CheckAndStartGame(tableId);
             var state = GetOrCreateTable(tableId);
             await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", state);
+
+            _ = CheckAndProcessWaitlistAsync(tableId);
 
             return true;
         }
         catch (Exception ex)
         {
-            // 👇 CORREÇÃO: Impede que o SignalR derrube o WebSocket se der erro no banco/wallet
             Console.WriteLine($"[CRÍTICO] Erro ao sentar jogador: {ex.Message}");
             return false;
         }
@@ -513,7 +660,6 @@ public class GameManager
                 if (table.Phase == "waiting") player.Status = "waiting";
             }
 
-            // 👇 CORREÇÃO: Mesma lógica de forçar atualização instantânea da mesa na recarga
             CheckAndStartGame(tableId);
             var state = GetOrCreateTable(tableId);
             await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", state);
@@ -526,7 +672,6 @@ public class GameManager
             return false;
         }
     }
-
 
     public async Task<bool> StandUp(string tableId, string connectionId)
     {
@@ -590,6 +735,8 @@ public class GameManager
             var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
             _ = hubContext.Clients.Group(tableId).SendAsync("PlayerStoodUp", oldSeat);
             _ = hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+
+            _ = CheckAndProcessWaitlistAsync(tableId);
         }
 
         if (cashoutNow && chipsToReturn > 0 && !string.IsNullOrEmpty(userId))

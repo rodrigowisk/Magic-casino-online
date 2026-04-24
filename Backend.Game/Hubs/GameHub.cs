@@ -57,6 +57,30 @@ public class GameHub : Hub
         }
     }
 
+    // 👇 CORREÇÃO AQUI: Adicionado a recepção do nome (localUserName) para o GameManager
+    public async Task JoinWaitlist(string tableId, string localUserId, string localUserName)
+    {
+        var userId = string.IsNullOrWhiteSpace(localUserId) ? Context.ConnectionId : localUserId;
+        var userName = string.IsNullOrWhiteSpace(localUserName) ? "Jogador" : localUserName;
+
+        if (_gameManager.JoinWaitlist(tableId, userId, userName))
+        {
+            var tableState = _gameManager.GetOrCreateTable(tableId);
+            await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
+        }
+    }
+
+    public async Task LeaveWaitlist(string tableId, string localUserId)
+    {
+        var userId = string.IsNullOrWhiteSpace(localUserId) ? Context.ConnectionId : localUserId;
+        if (_gameManager.LeaveWaitlist(tableId, userId))
+        {
+            var tableState = _gameManager.GetOrCreateTable(tableId);
+            await Clients.Group(tableId).SendAsync("TableStateUpdated", tableState);
+        }
+    }
+
+
     public async Task UpdateAvatar(string tableId, string newAvatar)
     {
         if (_gameManager.UpdatePlayerAvatar(tableId, Context.ConnectionId, newAvatar))
@@ -102,7 +126,7 @@ public class GameHub : Hub
             }
             else
             {
-                await Clients.Caller.SendAsync("ReceiveError", "Assento ocupado ou saldo insuficiente na carteira para esse Buy-in.");
+                await Clients.Caller.SendAsync("ReceiveError", "Assento ocupado, reservado para a fila ou saldo insuficiente na carteira para esse Buy-in.");
             }
         }
         catch (Exception ex)

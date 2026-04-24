@@ -114,7 +114,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chevron-icon"><polyline points="9 18 15 12 9 6"></polyline></svg>
               </button>
 
-              <button class="list-item clickable" @click="openDoc('Termos de Uso')">
+              <button class="list-item clickable" @click="$router.push('/politica')">
                 <div class="item-left">
                   <div class="icon-box bg-gray-light">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="item-icon text-gray"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><line x1="10" y1="9" x2="8" y2="9"></line></svg>
@@ -126,7 +126,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="chevron-icon"><polyline points="9 18 15 12 9 6"></polyline></svg>
               </button>
 
-              <button class="list-item clickable" @click="openDoc('Política de Privacidade')">
+              <button class="list-item clickable" @click="$router.push('/politica')">
                 <div class="item-left">
                   <div class="icon-box bg-gray-light">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="item-icon text-gray"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><line x1="10" y1="9" x2="8" y2="9"></line></svg>
@@ -237,7 +237,7 @@ const toggleSetting = (key: keyof typeof settings) => {
   }
 };
 
-// Abre o modal genérico de leitura
+// Abre o modal genérico de leitura (ainda usado pelas regras de cacheta e jogo responsável)
 const openDoc = (title: string) => {
   docTitle.value = title;
   showDocModal.value = true;
@@ -398,7 +398,7 @@ const voltar = () => {
 .section-body { display: flex; flex-direction: column; }
 
 /* ========================================================
-   ITENS DA LISTA (AQUI ESTAVA O BUG DO OVERFLOW)
+   ITENS DA LISTA
    ======================================================== */
 .list-item {
   display: flex;
@@ -413,7 +413,7 @@ const voltar = () => {
   color: white;
   text-align: left;
   width: 100%;
-  box-sizing: border-box; /* 🔥 A CORREÇÃO: Garante que o padding não estoure o 100% 🔥 */
+  box-sizing: border-box; 
   transition: 0.2s;
 }
 
@@ -426,7 +426,7 @@ const voltar = () => {
   align-items: center;
   gap: 15px;
   flex: 1;
-  min-width: 0; /* Ajuda a não estourar textos muito longos */
+  min-width: 0; 
 }
 
 .icon-box {
@@ -461,7 +461,7 @@ const voltar = () => {
   position: relative;
   transition: all 0.3s ease;
   cursor: pointer;
-  flex-shrink: 0; /* 🔥 Impede o Toggle de ser esmagado pelo texto 🔥 */
+  flex-shrink: 0; 
 }
 
 .toggle-switch.active {

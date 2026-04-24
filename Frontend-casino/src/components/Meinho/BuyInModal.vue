@@ -1,6 +1,11 @@
 <template>
   <div class="rebuy-modal-overlay">
     <div class="rebuy-modal">
+      
+      <div v-if="props.isWaitlist" class="waitlist-warning">
+        ⏳ SUA VEZ! VOCÊ TEM {{ waitlistSeconds }}s
+      </div>
+
       <h2>Entrar na Mesa</h2>
       <p>Confirme as regras antes de sentar:</p>
 
@@ -47,13 +52,16 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   minBet: number;
   minBuyIn: number; 
   rake: number;
   maxBalance: number;
-  expiresAt: string; // 👇 A data exata que a mesa morre
-}>();
+  expiresAt: string;
+  isWaitlist?: boolean; 
+}>(), {
+  isWaitlist: false
+});
 
 const emit = defineEmits(['confirm', 'cancel']);
 
@@ -61,33 +69,30 @@ const localBuyInAmount = ref(props.minBuyIn);
 const timeLeftDisplay = ref('Calculando...');
 let timerId: ReturnType<typeof setInterval> | null = null;
 
+const waitlistSeconds = ref(15);
+let waitlistTimerId: ReturnType<typeof setInterval> | null = null;
+
 watch(() => props.minBuyIn, () => {
   if (localBuyInAmount.value < props.minBuyIn) {
     localBuyInAmount.value = props.minBuyIn;
   }
 });
 
-// LÓGICA DO CRONÓMETRO: Calcula a diferença entre a hora atual e a hora de encerramento
 function formatTimeLeft() {
   if (!props.expiresAt) return '--:--:--';
   
-  // O construtor Date do JS lida automaticamente com ISO strings (UTC)
   const expDate = new Date(props.expiresAt);
   const now = new Date();
-  
   const diffMs = expDate.getTime() - now.getTime();
   
-  // Se já tiver passado do tempo, a mesa avisa que fechou
   if (diffMs <= 0) {
     return 'Mesa Encerrada';
   }
 
-  // Matemática simples para separar Horas, Minutos e Segundos
   const h = Math.floor(diffMs / (1000 * 60 * 60));
   const m = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
   const s = Math.floor((diffMs % (1000 * 60)) / 1000);
 
-  // Formata sempre com 2 dígitos (ex: 04:09:05)
   return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
@@ -96,17 +101,26 @@ onMounted(() => {
     localBuyInAmount.value = props.minBuyIn;
   }
   
-  // Roda logo que abre o modal para não aparecer "Calculando..."
   timeLeftDisplay.value = formatTimeLeft();
-  
-  // Inicia o loop para atualizar a cada segundo
   timerId = setInterval(() => {
     timeLeftDisplay.value = formatTimeLeft();
   }, 1000);
+
+  if (props.isWaitlist) {
+    waitlistSeconds.value = 15;
+    waitlistTimerId = setInterval(() => {
+      waitlistSeconds.value--;
+      if (waitlistSeconds.value <= 0) {
+        clearInterval(waitlistTimerId!);
+        emit('cancel'); 
+      }
+    }, 1000);
+  }
 });
 
 onUnmounted(() => {
-  if (timerId) clearInterval(timerId); // Limpa o timer da memória quando fechar o modal
+  if (timerId) clearInterval(timerId); 
+  if (waitlistTimerId) clearInterval(waitlistTimerId); 
 });
 </script>
 
@@ -116,9 +130,9 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   width: 430px;
-  height: 900px; /* ✅ CORRIGIDO PARA O TAMANHO DO JOGO */
+  height: 900px;
   background: rgba(0, 0, 0, 0.85);
-  backdrop-filter: blur(5px); /* ✅ Adicionado desfoque no fundo */
+  backdrop-filter: blur(5px);
   z-index: 500;
   display: flex;
   justify-content: center;
@@ -144,6 +158,25 @@ onUnmounted(() => {
   100% { transform: scale(1); opacity: 1; }
 }
 
+.waitlist-warning {
+  background: rgba(241, 196, 15, 0.15);
+  border: 1px solid #f1c40f;
+  color: #f1c40f;
+  padding: 10px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-weight: 900;
+  font-size: 14px;
+  letter-spacing: 1px;
+  animation: pulseGlow 1.5s infinite;
+}
+
+@keyframes pulseGlow {
+  0% { box-shadow: 0 0 5px rgba(241, 196, 15, 0.2); }
+  50% { box-shadow: 0 0 15px rgba(241, 196, 15, 0.6); }
+  100% { box-shadow: 0 0 5px rgba(241, 196, 15, 0.2); }
+}
+
 .rebuy-modal h2 { 
   margin-top: 0; 
   font-size: 20px; 
@@ -163,7 +196,7 @@ onUnmounted(() => {
   border-radius: 8px;
   padding: 15px;
   margin: 15px 0;
-  text-align: left; /* Alinha os textos à esquerda para facilitar leitura de tabela */
+  text-align: left; 
 }
 
 .info-box p {
@@ -171,7 +204,7 @@ onUnmounted(() => {
   color: #ccc;
   font-size: 13px;
   display: flex;
-  justify-content: space-between; /* Empurra os valores para a direita */
+  justify-content: space-between; 
 }
 
 .gold {
@@ -197,7 +230,6 @@ onUnmounted(() => {
   transition: color 0.3s;
 }
 
-/* 👇 Classes dinâmicas para caso de erro de saldo 👇 */
 .text-error {
   color: #ff4757 !important;
 }
@@ -258,7 +290,6 @@ onUnmounted(() => {
   color: #000; 
 }
 
-/* 👇 Estilo para o botão Sentar quando estiver desativado 👇 */
 .btn-confirm:disabled {
   background: #444;
   color: #888;

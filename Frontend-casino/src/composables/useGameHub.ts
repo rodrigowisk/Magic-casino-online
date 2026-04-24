@@ -8,6 +8,10 @@ export interface GameHubCallbacks {
     onPlayerSatDown?: (logicalSeat: number) => void; 
     onPlayerStoodUp?: (logicalSeat: number) => void; 
     onReceiveError?: (msg: string) => void; 
+    
+    // 👇 NOVOS EVENTOS DA FILA DE ESPERA 👇
+    onWaitlistYourTurn?: () => void;
+    onWaitlistExpired?: () => void;
 }
 
 export function useGameHub(
@@ -73,11 +77,18 @@ export function useGameHub(
                 } else {
                     console.error("Erro do Servidor:", msg);
                 }
-                // Fallback de segurança para garantir que a mensagem é lida
                 alert("Aviso do Servidor: " + msg); 
             });
 
-            // 👇 A PEÇA QUE FALTAVA: Re-registrar o jogador no servidor após o Cloudflare cortar a ligação
+            // 👇 ESCUTANDO O AVISO DA FILA DE ESPERA 👇
+            hubConnection.on("WaitlistYourTurn", () => {
+                if (callbacks.onWaitlistYourTurn) callbacks.onWaitlistYourTurn();
+            });
+
+            hubConnection.on("WaitlistExpired", () => {
+                if (callbacks.onWaitlistExpired) callbacks.onWaitlistExpired();
+            });
+
             hubConnection.onreconnected(async (connectionId) => {
                 console.log("SignalR reconectado com sucesso! Atualizando ID no servidor...");
                 await hubConnection?.invoke("JoinTable", tableId, currentUserId, currentUserName, currentUserAvatar);
@@ -128,7 +139,16 @@ export function useGameHub(
         if (hubConnection) await hubConnection.invoke("ConfirmBet", tableId, betValue, currentUserId);
     };
 
+    // 👇 CORREÇÃO: AGORA ENVIA O NOME DO JOGADOR PARA O C# 👇
+    const joinWaitlist = async () => {
+        if (hubConnection) await hubConnection.invoke("JoinWaitlist", tableId, currentUserId, currentUserName);
+    };
+
+    const leaveWaitlist = async () => {
+        if (hubConnection) await hubConnection.invoke("LeaveWaitlist", tableId, currentUserId);
+    };
+
     return {
-        connect, disconnect, getConnectionId, updateAvatar, sitDown, rebuy, standUp, setLeaveNextHand, skipBet, confirmBet
+        connect, disconnect, getConnectionId, updateAvatar, sitDown, rebuy, standUp, setLeaveNextHand, skipBet, confirmBet, joinWaitlist, leaveWaitlist
     };
 }

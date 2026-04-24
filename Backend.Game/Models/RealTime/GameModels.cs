@@ -3,6 +3,12 @@ using System.Collections.Generic;
 
 namespace Backend.Game.Models.RealTime;
 
+public class WaitlistEntry
+{
+    public string UserId { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+}
+
 public class TableState
 {
     public string TableId { get; set; } = string.Empty;
@@ -23,6 +29,9 @@ public class TableState
 
     public string CoverImage { get; set; } = "casino.webp";
 
+    public List<WaitlistEntry> Waitlist { get; set; } = new();
+    public string? ReservedForUserId { get; set; }
+
     public List<PlayerState> Players { get; set; } = new();
 }
 
@@ -37,20 +46,23 @@ public class PlayerState
     public int Seat { get; set; } = -1;
     public decimal Chips { get; set; } = 0;
 
-    // 👇 NOVO: Segura as fichas recarregadas durante a mão ativa
     public decimal PendingRebuy { get; set; } = 0;
 
     public decimal TotalBuyIn { get; set; } = 0;
     public decimal TotalCashOut { get; set; } = 0;
-    public DateTime LastActiveAt { get; set; } = DateTime.UtcNow;
 
+    // 👇 PROPRIEDADE RESTAURADA AQUI 👇
     public decimal LastChips { get; set; } = 0;
 
-    public bool IsSeated { get; set; } = false;
-    public string Status { get; set; } = "waiting";
+    public DateTime LastActiveAt { get; set; } = DateTime.UtcNow;
+
+    public int MissedTurns { get; set; } = 0;
+
     public bool LeaveNextHand { get; set; } = false;
+
     public List<string> Cards { get; set; } = new();
 
-    // 🔥 Contador de vezes seguidas que o tempo estourou
-    public int MissedTurns { get; set; } = 0;
+    public bool IsSeated { get; set; } = false;
+
+    public string Status { get; set; } = "waiting";
 }

@@ -28,6 +28,9 @@ import Caixa from '../views/Caixa.vue';
 import Perfil from '../views/Perfil.vue';
 import Configuracoes from '../views/Configuracoes.vue';
 
+// 👇 IMPORT DA NOSSA TELA DE TERMOS E PRIVACIDADE 👇
+import Politica from '../components/Politica.vue';
+
 // 👇 NOVA TELA DO AGENTE 👇
 import Agente from '../views/AgentPanel.vue';
 import OwnerPanel from '../views/OwnerPanel.vue';
@@ -58,6 +61,9 @@ const routes = [
   { path: '/caixa', name: 'Caixa', component: Caixa },
   { path: '/perfil', name: 'Perfil', component: Perfil },
   { path: '/configuracoes', name: 'Configuracoes', component: Configuracoes },
+  
+  // 👇 NOVA ROTA PARA OS TERMOS DE USO E PRIVACIDADE 👇
+  { path: '/politica', name: 'Politica', component: Politica },
   
   // 👇 Nova Rota do Agente 👇
   { path: '/agente', name: 'Agente', component: Agente },
