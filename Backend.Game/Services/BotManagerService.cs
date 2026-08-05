@@ -60,12 +60,13 @@ public class BotManagerService : BackgroundService
                 using var scope = _serviceProvider.CreateScope();
                 var gameManager = scope.ServiceProvider.GetRequiredService<GameManager>();
                 var hubContext = scope.ServiceProvider.GetRequiredService<IHubContext<GameHub>>();
+                
+                // Injeção do WalletService resolvida no escopo
+                var walletService = scope.ServiceProvider.GetRequiredService<IWalletService>();
 
-                ManageBotSeating(gameManager, hubContext);
+                await ManageBotSeating(gameManager, hubContext, walletService);
                 await ManageBotTurns(gameManager, hubContext);
-
-                // O Bot agora verifica se precisa de Rebuy a cada ciclo
-                await ManageBotRebuys(gameManager, hubContext);
+                await ManageBotRebuys(gameManager, hubContext, walletService);
 
                 CheckBotTimeouts(gameManager);
             }
@@ -79,7 +80,7 @@ public class BotManagerService : BackgroundService
     }
 
     // INTELIGÊNCIA DE REBUY
-    private async Task ManageBotRebuys(GameManager gameManager, IHubContext<GameHub> hubContext)
+    private async Task ManageBotRebuys(GameManager gameManager, IHubContext<GameHub> hubContext, IWalletService walletService)
     {
         var allTables = gameManager.GetAllTables();
 
@@ -97,10 +98,21 @@ public class BotManagerService : BackgroundService
                     // Evita tentar rebuy infinitamente se ele já pediu pra sair
                     if (botPlayer.LeaveNextHand) continue;
 
-                    // O bot decide comprar de 1 a 3 vezes o MinBuyIn
-                    decimal rebuyAmount = table.MinBuyIn * _rnd.Next(1, 4);
+                    // Verifica o saldo da carteira ANTES de chamar o GameManager para evitar erros 400
+                    decimal currentBalance = await walletService.GetBalanceAsync(botPlayer.UserId);
 
-                    bool rebuySuccess = await gameManager.Rebuy(table.TableId, botPlayer.ConnectionId, rebuyAmount);
+                    if (currentBalance < table.MinBuyIn)
+                    {
+                        // O bot não tem dinheiro suficiente para o rebuy mínimo. Ele levanta e sai.
+                        gameManager.SetLeaveNextHand(table.TableId, botPlayer.ConnectionId, true);
+                        continue;
+                    }
+
+                    // O bot decide comprar de 1 a 3 vezes o MinBuyIn, limitado ao saldo real dele
+                    decimal targetRebuyAmount = table.MinBuyIn * _rnd.Next(1, 4);
+                    decimal actualRebuyAmount = Math.Min(targetRebuyAmount, currentBalance);
+
+                    bool rebuySuccess = await gameManager.Rebuy(table.TableId, botPlayer.ConnectionId, actualRebuyAmount);
 
                     if (rebuySuccess)
                     {
@@ -109,7 +121,7 @@ public class BotManagerService : BackgroundService
                     }
                     else
                     {
-                        // Se falhou (o bot real não tem saldo no banco de dados), ele desiste e levanta
+                        // Se falhou por alguma outra razão, ele desiste e levanta
                         gameManager.SetLeaveNextHand(table.TableId, botPlayer.ConnectionId, true);
                     }
                 }
@@ -117,7 +129,7 @@ public class BotManagerService : BackgroundService
         }
     }
 
-    private void ManageBotSeating(GameManager gameManager, IHubContext<GameHub> hubContext)
+    private async Task ManageBotSeating(GameManager gameManager, IHubContext<GameHub> hubContext, IWalletService walletService)
     {
         var allTables = gameManager.GetAllTables();
 
@@ -130,13 +142,13 @@ public class BotManagerService : BackgroundService
             {
                 if (_rnd.Next(100) < 30)
                 {
-                    InjectBot(table, gameManager, hubContext);
+                    await InjectBot(table, gameManager, hubContext, walletService);
                 }
             }
         }
     }
 
-    private void InjectBot(TableState table, GameManager gameManager, IHubContext<GameHub> hubContext)
+    private async Task InjectBot(TableState table, GameManager gameManager, IHubContext<GameHub> hubContext, IWalletService walletService)
     {
         var occupiedSeats = table.Players.Where(p => p.IsSeated).Select(p => p.Seat).ToList();
         int freeSeat = Enumerable.Range(0, table.MaxPlayers).FirstOrDefault(s => !occupiedSeats.Contains(s), -1);
@@ -152,8 +164,18 @@ public class BotManagerService : BackgroundService
         string selectedBotName = _botRealAccounts[selectedBotUserId];
         string botConnId = $"conn_bot_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
 
+        // Verifica o saldo da carteira ANTES de sentar o bot para evitar erros 400
+        decimal currentBalance = await walletService.GetBalanceAsync(selectedBotUserId);
+
+        if (currentBalance < table.MinBuyIn)
+        {
+            // O bot está sem fundos e não pode sentar
+            return;
+        }
+
         int multiplier = _rnd.Next(1, 6);
-        decimal buyInAmount = table.MinBuyIn * multiplier;
+        decimal targetBuyInAmount = table.MinBuyIn * multiplier;
+        decimal buyInAmount = Math.Min(targetBuyInAmount, currentBalance);
 
         var botPlayer = new PlayerState
         {
@@ -245,7 +267,6 @@ public class BotManagerService : BackgroundService
         if (botPlayer.Chips <= 0)
         {
             await ForceSkipAndExit();
-            // REMOVI O "LeaveNextHand" DAQUI! Agora ele só pula a vez e o "ManageBotRebuys" decide se ele levanta ou faz rebuy.
             return;
         }
 

@@ -38,6 +38,10 @@ public class User
     [Column("Balance")]
     public decimal Balance { get; set; } = 0.00m;
 
+    [Column("demo_balance")] 
+    public decimal DemoBalance { get; set; } = 1000m;
+
+
     [MaxLength(50)]
     [Column("apelido")]
     public string? Apelido { get; set; }
@@ -49,9 +53,11 @@ public class User
     public DateTime UpdatedAt { get; set; }
 
     [Column("isactive")]
-    public bool IsActive { get; set; }
+    public bool IsActive { get; set; } = true;
 
-    // 👇 NOVA COLUNA DO SISTEMA DE AFILIADOS 👇
     [Column("referred_by")]
     public Guid? ReferredBy { get; set; }
+
+    [Column("session_id")]
+    public Guid? SessionId { get; set; }
 }

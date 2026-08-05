@@ -27,11 +27,15 @@ public class CreateTableDto
     [Range(1, 48)]
     public int DurationHours { get; set; }
 
-    // 👇 NOVIDADE: Recebe o tipo do jogo do frontend 👇
+        // 👇 NOVIDADE: Recebe o tipo do jogo do frontend 👇
     [Required]
     public string GameType { get; set; } = string.Empty;
 
     public string? Password { get; set; }
+
+    public string CoverImage { get; set; } = "casino.webp";
+
+    public bool IsDemo { get; set; }
 }
 
 public class TableResponseDto
@@ -51,6 +55,10 @@ public class TableResponseDto
     public string GameType { get; set; } = string.Empty;
 
     public bool HasPassword { get; set; }
+
+    public string CoverImage { get; set; } = "casino.webp";
+
+    public bool IsDemo { get; set; }
 }
 
 public class ValidatePasswordDto

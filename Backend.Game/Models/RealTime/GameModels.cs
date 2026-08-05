@@ -29,6 +29,8 @@ public class TableState
 
     public string CoverImage { get; set; } = "casino.webp";
 
+    public bool IsDemo { get; set; } = false;
+
     public List<WaitlistEntry> Waitlist { get; set; } = new();
     public string? ReservedForUserId { get; set; }
 

@@ -84,27 +84,28 @@ public class HandHistoryWorker : BackgroundService
     }
 
     private async Task SaveHandToDatabaseAsync(HandCompletedMessage data)
+{
+    using var scope = _scopeFactory.CreateScope();
+    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+    var handId = Guid.NewGuid();
+
+    var sqlHand = @"
+        INSERT INTO public.game_hands (id, game_table_id, community_cards, total_pot, total_rake, started_at, ended_at)
+        VALUES ({0}, {1}, ARRAY[{2}]::varchar[], {3}, {4}, {5}, {6})";
+
+    await dbContext.Database.ExecuteSqlRawAsync(sqlHand,
+        handId, data.GameTableId, string.Join(",", data.CommunityCards), data.TotalPot, data.TotalRake, data.EndedAt.AddMinutes(-1), data.EndedAt);
+
+    foreach (var player in data.Players)
     {
-        using var scope = _scopeFactory.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        // 👇 A MÁGICA AQUI: Inserindo a coluna player_name no SQL
+        var sqlPlayer = @"
+            INSERT INTO public.game_hand_players (id, game_hand_id, player_id, player_name, hole_cards, bet_amount, won_amount, net_profit, is_winner)
+            VALUES ({0}, {1}, {2}, {3}, ARRAY[{4}]::varchar[], {5}, {6}, {7}, {8})";
 
-        var handId = Guid.NewGuid();
-
-        var sqlHand = @"
-            INSERT INTO public.game_hands (id, game_table_id, community_cards, total_pot, total_rake, started_at, ended_at)
-            VALUES ({0}, {1}, ARRAY[{2}]::varchar[], {3}, {4}, {5}, {6})";
-
-        await dbContext.Database.ExecuteSqlRawAsync(sqlHand,
-            handId, data.GameTableId, string.Join(",", data.CommunityCards), data.TotalPot, data.TotalRake, data.EndedAt.AddMinutes(-1), data.EndedAt);
-
-        foreach (var player in data.Players)
-        {
-            var sqlPlayer = @"
-                INSERT INTO public.game_hand_players (id, game_hand_id, player_id, hole_cards, bet_amount, won_amount, net_profit, is_winner)
-                VALUES ({0}, {1}, {2}, ARRAY[{3}]::varchar[], {4}, {5}, {6}, {7})";
-
-            await dbContext.Database.ExecuteSqlRawAsync(sqlPlayer,
-                Guid.NewGuid(), handId, player.PlayerId, string.Join(",", player.HoleCards), player.BetAmount, player.WonAmount, player.NetProfit, player.IsWinner);
-        }
+        await dbContext.Database.ExecuteSqlRawAsync(sqlPlayer,
+            Guid.NewGuid(), handId, player.PlayerId, player.PlayerName ?? "Jogador", string.Join(",", player.HoleCards), player.BetAmount, player.WonAmount, player.NetProfit, player.IsWinner);
     }
+  }
 }

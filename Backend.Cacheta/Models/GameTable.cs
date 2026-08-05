@@ -44,6 +44,14 @@ public class GameTable
     [Column("isactive")]
     public bool IsActive { get; set; }
 
-    [Column("game_type")]
+        [Column("game_type")]
     public string GameType { get; set; } = string.Empty;
+
+    // 👇 NOVO: Coluna no banco para salvar a imagem
+    [MaxLength(255)]
+    [Column("cover_image")]
+    public string CoverImage { get; set; } = "casino.webp";
+
+    [Column("is_demo")]
+    public bool IsDemo { get; set; }
 }

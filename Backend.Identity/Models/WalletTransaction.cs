@@ -1,10 +1,12 @@
 ﻿using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore; // 🔥 FALTOU ESTA LINHA 🔥
 
 namespace Backend.Identity.Models;
 
 [Table("wallet_transactions")]
+[Index(nameof(TransactionId), IsUnique = false)] // 🔥 ADICIONE ISTO AQUI
 public class WalletTransaction
 {
     [Key]

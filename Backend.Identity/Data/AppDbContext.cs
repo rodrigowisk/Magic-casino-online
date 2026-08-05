@@ -6,7 +6,6 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Backend.Identity.Data;
 
-// 👇 MODELOS DE ROLES (Você pode mover para arquivos separados na pasta Models depois se preferir)
 [Table("roles")]
 public class Role
 {
@@ -29,7 +28,24 @@ public class UserRole
     [Column("roleid")]
     public int RoleId { get; set; }
 }
-// 👆 FIM DOS MODELOS DE ROLES
+
+// 👇 NOVO: Entidade para a tabela de solicitações pendentes
+[Table("pending_agent_requests")]
+public class PendingAgentRequest
+{
+    [Key]
+    [Column("id")]
+    public Guid Id { get; set; }
+
+    [Column("userid")]
+    public Guid UserId { get; set; }
+
+    [Column("agentid")]
+    public Guid AgentId { get; set; }
+
+    [Column("createdat")]
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
 
 public class AppDbContext : DbContext
 {
@@ -41,10 +57,12 @@ public class AppDbContext : DbContext
     public DbSet<WalletTransaction> WalletTransactions { get; set; }
     public DbSet<Agent> Agents { get; set; }
     public DbSet<AgentWalletTransaction> AgentWalletTransactions { get; set; }
-
-    // 👇 ADICIONADO PARA O SISTEMA DE ADMIN 👇
     public DbSet<Role> Roles { get; set; }
     public DbSet<UserRole> UserRoles { get; set; }
+
+    public DbSet<SystemSetting> SystemSettings { get; set; }
+
+    public DbSet<PendingAgentRequest> PendingAgentRequests { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -52,6 +70,10 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<User>()
             .Property(u => u.Id)
+            .HasDefaultValueSql("gen_random_uuid()");
+
+        modelBuilder.Entity<PendingAgentRequest>()
+            .Property(p => p.Id)
             .HasDefaultValueSql("gen_random_uuid()");
 
         modelBuilder.Entity<WalletTransaction>()
@@ -66,7 +88,6 @@ public class AppDbContext : DbContext
             .HasIndex(a => a.UserId)
             .IsUnique();
 
-        // Configura a chave composta da tabela associativa UserRoles
         modelBuilder.Entity<UserRole>()
             .HasKey(ur => new { ur.UserId, ur.RoleId });
     }

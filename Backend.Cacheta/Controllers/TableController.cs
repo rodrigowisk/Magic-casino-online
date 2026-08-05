@@ -28,7 +28,7 @@ public class TableController : ControllerBase
             // 👇 MÁGICA: Agora calcula com base nas HORAS (.AddHours) e filtra apenas mesas de "cacheta" 👇
             .Where(t => t.IsActive && t.CreatedAt.AddHours(t.DurationHours) > now && t.GameType == "cacheta")
             .OrderByDescending(t => t.CreatedAt)
-            .Select(t => new TableResponseDto
+                        .Select(t => new TableResponseDto
             {
                 Id = t.Id,
                 Name = t.Name,
@@ -39,7 +39,9 @@ public class TableController : ControllerBase
                 MinBuyIn = t.MinBuyIn,
                 DurationHours = t.DurationHours,
                 GameType = t.GameType, // 👇 Retorna o tipo de jogo para o frontend
-                HasPassword = !string.IsNullOrEmpty(t.PasswordHash)
+                HasPassword = !string.IsNullOrEmpty(t.PasswordHash),
+                CoverImage = t.CoverImage,
+                IsDemo = t.IsDemo
             })
             .ToListAsync();
 
@@ -56,7 +58,7 @@ public class TableController : ControllerBase
             passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
         }
 
-        var newTable = new GameTable
+                var newTable = new GameTable
         {
             Id = Guid.NewGuid(),
             Name = request.Name,
@@ -66,10 +68,12 @@ public class TableController : ControllerBase
             MinBuyIn = request.MinBuyIn,
             DurationHours = request.DurationHours,
             GameType = request.GameType, // 👇 NOVIDADE: Salva o tipo do jogo no banco
+            CoverImage = request.CoverImage,
             CurrentPlayers = 0,
             PasswordHash = passwordHash,
             CreatedAt = DateTime.UtcNow,
-            IsActive = true
+            IsActive = true,
+            IsDemo = request.IsDemo
         };
 
         _context.GameTables.Add(newTable);

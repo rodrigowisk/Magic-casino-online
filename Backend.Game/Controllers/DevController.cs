@@ -2,11 +2,13 @@
 using Backend.Game.Services;
 using System.Linq;
 using System.Collections.Generic;
+using Microsoft.AspNetCore.Authorization; // 👇 NOVO: Necessário para usar as travas de segurança
 
 namespace Backend.Game.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Roles = "Admin")] // 🔥 CORREÇÃO CRÍTICA: Ninguém além do dono do cassino pode usar o modo Dev!
 public class DevController : ControllerBase
 {
     private readonly GameManager _gameManager;

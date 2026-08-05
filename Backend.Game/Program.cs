@@ -1,10 +1,11 @@
+Ôªøusing System.Text;
 using Backend.Game.Data;
 using Backend.Game.Hubs;
 using Backend.Game.Services;
+using Backend.Game.Workers;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,19 +13,21 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-builder.Services.AddSignalR(); // O MOTOR EM TEMPO REAL EST¡ LIGADO AQUI!
+builder.Services.AddSignalR(); // O MOTOR EM TEMPO REAL EST√Å LIGADO AQUI!
 builder.Services.AddHostedService<BotManagerService>();
 
-// 2. Adicionar o Gerenciador de Mesas (Singleton: mantÈm as mesas ativas na memÛria do servidor)
+// 2. Adicionar o Gerenciador de Mesas (Singleton: mant√©m as mesas ativas na mem√≥ria do servidor)
 builder.Services.AddSingleton<GameManager>();
 
-// ---> INTEGRA«√O RABBITMQ (Adicionado aqui) <---
+// ---> INTEGRA√á√ÉO RABBITMQ (Adicionado aqui) <---
 builder.Services.AddSingleton<Backend.Game.Messaging.IRabbitMqService, Backend.Game.Messaging.RabbitMqService>();
 builder.Services.AddHostedService<Backend.Game.Messaging.HandHistoryWorker>();
+builder.Services.AddHostedService<Backend.Game.Workers.TableCleanupWorker>();
+builder.Services.AddHostedService<Backend.Game.Workers.CrashRecoveryWorker>();
 
-// ---> INTEGRA«√O WALLET SERVICE (CARTEIRA) <---
-// Registra o WalletService e configura o endereÁo base da API do Identity
-// O Docker usar· a vari·vel de ambiente IdentityApiUrl, ou usar· localhost por padr„o em dev.
+// ---> INTEGRA√á√ÉO WALLET SERVICE (CARTEIRA) <---
+// Registra o WalletService e configura o endere√ßo base da API do Identity
+// O Docker usar√° a vari√°vel de ambiente IdentityApiUrl, ou usar√° localhost por padr√£o em dev.
 builder.Services.AddHttpClient<IWalletService, WalletService>(client =>
 {
     client.BaseAddress = new Uri(builder.Configuration["IdentityApiUrl"] ?? "http://localhost:5001");
@@ -37,7 +40,7 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(connectionString));
 
-// 4. Configurar a PolÌtica de CORS (AGORA COM O SEU DOMÕNIO LIBERADO)
+// 4. Configurar a Pol√≠tica de CORS (AGORA COM O SEU DOM√çNIO LIBERADO E MOBILE)
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowVueFrontend", policy =>
@@ -46,7 +49,10 @@ builder.Services.AddCors(options =>
                 "http://localhost:5173",
                 "http://localhost:5174",
                 "https://magic-casino.online",
-                "https://www.magic-casino.online"
+                "https://www.magic-casino.online",
+                "http://localhost",       // üëâ Android Capacitor (vers√µes antigas)
+                "https://localhost",      // üëâ Android Capacitor (vers√µes novas)
+                "capacitor://localhost"   // üëâ iOS Capacitor
             )
               .AllowAnyHeader()
               .AllowAnyMethod()
@@ -54,7 +60,7 @@ builder.Services.AddCors(options =>
     });
 });
 
-// 5. Configurar AutenticaÁ„o JWT com suporte a WebSockets (SignalR)
+// 5. Configurar Autentica√ß√£o JWT com suporte a WebSockets (SignalR)
 var jwtKey = builder.Configuration["Jwt:Key"] ?? "UmaChaveSuperSecretaMuitoLongaParaOJWT123!";
 var keyBytes = Encoding.ASCII.GetBytes(jwtKey);
 
@@ -95,13 +101,13 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection();
 app.UseCors("AllowVueFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
-// 6. Mapear o t˙nel WebSocket do SignalR
+// 6. Mapear o t√∫nel WebSocket do SignalR
 app.MapHub<GameHub>("/hubs/game");
 
 app.Run();

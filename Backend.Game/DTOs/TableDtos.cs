@@ -58,6 +58,9 @@ public class TableResponseDto
 
     // 👇 NOVO: Devolve a imagem da capa para o Lobby do Vue
     public string CoverImage { get; set; } = string.Empty;
+
+    // 👇 ADICIONADO AQUI: A flag que diz ao Vue se a mesa é de Treino 👇
+    public bool IsDemo { get; set; }
 }
 
 public class ValidatePasswordDto

@@ -1,4 +1,5 @@
-﻿using System.ComponentModel.DataAnnotations;
+﻿using System;
+using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Backend.Game.Models;
@@ -50,4 +51,7 @@ public class GameTable
     [MaxLength(255)]
     [Column("cover_image")]
     public string CoverImage { get; set; } = "casino.webp";
+
+    [Column("is_demo")]
+    public bool IsDemo { get; set; }
 }

@@ -1,4 +1,5 @@
-using Backend.Identity.Data;
+﻿using Backend.Identity.Data;
+using Backend.Identity.Hubs;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -6,10 +7,11 @@ using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Adicionar suporte a Controllers e Swagger
+// 1. Adicionar suporte a Controllers, Swagger e SIGNALR
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddSignalR(); // Habilita o SignalR
 
 // 2. Configurar o Banco de Dados PostgreSQL (Identidade)
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
@@ -18,7 +20,7 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(connectionString));
 
-// 3. CONFIGURA��O DE CORS (Essencial para o Login funcionar na nuvem!)
+// 3. CONFIGURAÇÃO DE CORS
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowVueFrontend", policy =>
@@ -27,7 +29,10 @@ builder.Services.AddCors(options =>
                 "http://localhost:5173",
                 "http://localhost:5174",
                 "https://magic-casino.online",
-                "https://www.magic-casino.online"
+                "https://www.magic-casino.online",
+                "http://localhost",
+                "https://localhost",      // 👉 A MÁGICA ESTÁ AQUI (O que o seu app Android usa)
+                "capacitor://localhost"   // 👉 Garantia para o iOS
             )
               .AllowAnyHeader()
               .AllowAnyMethod()
@@ -51,25 +56,43 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuer = false,
             ValidateAudience = false
         };
+
+        // 👇 CORREÇÃO: Adicionado o /api no caminho para o SignalR ler o Token JWT
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/api/hubs/session"))
+                {
+                    context.Token = accessToken;
+                }
+                return Task.CompletedTask;
+            }
+        };
     });
 
 var app = builder.Build();
 
-// Configura��es do ambiente
+// Configurações do ambiente
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection(); 
 
-// 5. APLICAR O CORS (Deve vir antes da Autentica��o)
+// 5. APLICAR O CORS (Antes da Autenticação)
 app.UseCors("AllowVueFrontend");
 
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+// 👇 CORREÇÃO CRÍTICA AQUI: Mapeando com o /api para o front-end achar a porta correta 👇
+app.MapHub<SessionHub>("/api/hubs/session");
 
 app.Run();

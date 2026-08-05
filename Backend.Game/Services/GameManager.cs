@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace Backend.Game.Services;
 
@@ -18,22 +19,29 @@ public class GameManager
     private readonly ConcurrentDictionary<string, TableState> _tables = new();
     private readonly ConcurrentDictionary<string, List<string>> _tableDecks = new();
 
+    private readonly ConcurrentDictionary<string, int> _tableLastActionSeat = new();
+
     private readonly IServiceProvider _serviceProvider;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly Timer _serverTickTimer;
     private readonly IRabbitMqService _rabbitMqService;
     private readonly IWalletService _walletService;
+    private readonly ILogger<GameManager> _logger;
+    private DateTime _lastCleanupTime = DateTime.UtcNow;
 
     public GameManager(
         IServiceProvider serviceProvider,
         IServiceScopeFactory scopeFactory,
         IRabbitMqService rabbitMqService,
-        IWalletService walletService)
+        IWalletService walletService,
+        ILogger<GameManager> logger)
     {
         _serviceProvider = serviceProvider;
         _scopeFactory = scopeFactory;
         _rabbitMqService = rabbitMqService;
         _walletService = walletService;
+        _logger = logger;
+
         _serverTickTimer = new Timer(CheckTimeouts, null, 1000, 1000);
     }
 
@@ -41,14 +49,101 @@ public class GameManager
 
     public int GetSeatedPlayerCount(string tableId)
     {
-        if (_tables.TryGetValue(tableId, out var table))
+        if (_tables.TryGetValue(tableId ?? "", out var table))
         {
             lock (table.Players)
             {
-                return table.Players.Count(p => p.IsSeated);
+                return table.Players.Count(p => p != null && p.IsSeated);
             }
         }
         return 0;
+    }
+
+    public async Task BroadcastTableStateAsync(string tableId)
+    {
+        var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+        var table = GetOrCreateTable(tableId);
+        
+        var observerTable = CloneAndMaskTable(table, null);
+        
+        List<string> seatedConnections = new List<string>();
+        
+        lock (table.Players)
+        {
+            foreach (var p in table.Players.Where(x => x != null && x.IsSeated && !string.IsNullOrEmpty(x.ConnectionId)))
+            {
+                seatedConnections.Add(p.ConnectionId);
+                var playerTable = CloneAndMaskTable(table, p.UserId);
+                hubContext.Clients.Client(p.ConnectionId).SendAsync("TableStateUpdated", playerTable);
+            }
+        }
+        
+        await hubContext.Clients.GroupExcept(tableId, seatedConnections).SendAsync("TableStateUpdated", observerTable);
+    }
+
+    private TableState CloneAndMaskTable(TableState original, string? targetUserId)
+    {
+        var copy = new TableState
+        {
+            TableId = original.TableId,
+            Name = original.Name,
+            Phase = original.Phase,
+            Pot = original.Pot,
+            MinBet = original.MinBet,
+            CurrentTurnSeat = original.CurrentTurnSeat,
+            CenterCard = original.CenterCard,
+            TurnEndTime = original.TurnEndTime,
+            MaxPlayers = original.MaxPlayers,
+            Rake = original.Rake,
+            MinBuyIn = original.MinBuyIn,
+            ExpiresAt = original.ExpiresAt,
+            CoverImage = original.CoverImage,
+            IsDemo = original.IsDemo,
+            ReservedForUserId = original.ReservedForUserId,
+            Waitlist = original.Waitlist?.ToList() ?? new List<WaitlistEntry>(),
+            Players = new List<PlayerState>()
+        };
+
+        lock (original.Players)
+        {
+            foreach (var p in original.Players)
+            {
+                var pCopy = new PlayerState
+                {
+                    ConnectionId = p.ConnectionId,
+                    UserId = p.UserId,
+                    Name = p.Name,
+                    Avatar = p.Avatar,
+                    Seat = p.Seat,
+                    Chips = p.Chips,
+                    PendingRebuy = p.PendingRebuy,
+                    TotalBuyIn = p.TotalBuyIn,
+                    TotalCashOut = p.TotalCashOut,
+                    LastChips = p.LastChips,
+                    LastActiveAt = p.LastActiveAt,
+                    MissedTurns = p.MissedTurns,
+                    LeaveNextHand = p.LeaveNextHand,
+                    IsSeated = p.IsSeated,
+                    Status = p.Status,
+                    Cards = new List<string>()
+                };
+
+                if (p.Cards != null && p.Cards.Any())
+                {
+                    if (p.UserId == targetUserId)
+                    {
+                        pCopy.Cards.AddRange(p.Cards);
+                    }
+                    else
+                    {
+                        pCopy.Cards.AddRange(p.Cards.Select(_ => "Hidden"));
+                    }
+                }
+
+                copy.Players.Add(pCopy);
+            }
+        }
+        return copy;
     }
 
     public bool JoinWaitlist(string tableId, string userId, string userName)
@@ -85,9 +180,7 @@ public class GameManager
             }
         }
 
-        // 👇 CORREÇÃO: Avisa a todos que a fila andou, independentemente de chamar o próximo ou não
-        var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-        _ = hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+        _ = BroadcastTableStateAsync(tableId);
 
         if (callNext)
         {
@@ -104,12 +197,10 @@ public class GameManager
 
         lock (table.Players)
         {
-            if (table.Players.Count(p => p.IsSeated) >= table.MaxPlayers) return;
+            if (table.Players.Count(p => p != null && p.IsSeated) >= table.MaxPlayers) return;
             if (!string.IsNullOrEmpty(table.ReservedForUserId)) return;
             if (table.Waitlist == null || !table.Waitlist.Any()) return;
 
-            // 👇 CORREÇÃO CRÍTICA: Pegamos o nome, mas NÃO REMOVEMOS ELE DA FILA AINDA!
-            // Ele fica visível como 1º da fila para todo mundo ver até que ele sente.
             userToNotify = table.Waitlist[0].UserId;
             table.ReservedForUserId = userToNotify;
         }
@@ -117,7 +208,7 @@ public class GameManager
         if (userToNotify != null)
         {
             var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+            await BroadcastTableStateAsync(tableId);
             await hubContext.Clients.Group($"user_{userToNotify}").SendAsync("WaitlistYourTurn", tableId);
 
             _ = Task.Run(async () =>
@@ -130,7 +221,6 @@ public class GameManager
                     {
                         table.ReservedForUserId = null;
 
-                        // 👇 Se o tempo de 15s dele esgotou e ele não clicou em nada, AÍ SIM ele sai da fila.
                         if (table.Waitlist != null)
                         {
                             table.Waitlist.RemoveAll(w => w.UserId == userToNotify);
@@ -142,10 +232,9 @@ public class GameManager
 
                 if (expired)
                 {
-                    await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+                    await BroadcastTableStateAsync(tableId);
                     await hubContext.Clients.Group($"user_{userToNotify}").SendAsync("WaitlistExpired", tableId);
 
-                    // Como a vaga dele expirou, chama o nº 2 da fila.
                     await CheckAndProcessWaitlistAsync(tableId);
                 }
             });
@@ -154,88 +243,155 @@ public class GameManager
 
     private void CheckTimeouts(object? state)
     {
+        var now = DateTime.UtcNow;
+        bool shouldCleanup = (now - _lastCleanupTime).TotalSeconds > 60;
+
         foreach (var table in _tables.Values)
         {
             bool isTimeout = false;
             int timeoutSeat = -1;
             bool roundEnded = false;
 
-            lock (table.Players)
+            if (table.Phase == "betting" && table.TurnEndTime.HasValue && now >= table.TurnEndTime.Value)
             {
-                if (table.Phase == "betting" && table.TurnEndTime.HasValue && DateTime.UtcNow >= table.TurnEndTime.Value)
+                lock (table.Players)
                 {
-                    isTimeout = true;
-                    timeoutSeat = table.CurrentTurnSeat;
-                    table.TurnEndTime = null;
-
-                    var player = table.Players.FirstOrDefault(p => p.Seat == timeoutSeat);
-                    if (player != null)
+                    if (table.Phase == "betting" && table.TurnEndTime.HasValue && now >= table.TurnEndTime.Value)
                     {
-                        player.MissedTurns++;
+                        isTimeout = true;
+                        timeoutSeat = table.CurrentTurnSeat;
+                        table.TurnEndTime = null;
 
-                        if (player.MissedTurns >= 3)
+                        _tableLastActionSeat[table.TableId] = timeoutSeat;
+
+                        var player = table.Players.FirstOrDefault(p => p != null && p.Seat == timeoutSeat);
+                        if (player != null)
                         {
-                            player.Chips += player.PendingRebuy;
-                            player.PendingRebuy = 0;
+                            player.MissedTurns++;
 
-                            decimal chipsToReturn = player.Chips;
-                            string uId = player.UserId;
-                            int oldSeat = player.Seat;
-
-                            player.Status = "out";
-                            player.IsSeated = false;
-                            player.Seat = -1;
-                            player.LeaveNextHand = false;
-                            player.TotalCashOut += player.Chips;
-                            player.LastChips = player.Chips;
-                            player.Chips = 0;
-                            player.LastActiveAt = DateTime.UtcNow;
-                            player.MissedTurns = 0;
-
-                            table.Phase = "resolving";
-                            PublishHandToRabbitMq(table, timeoutSeat, 0, 0, 0, false, 0);
-                            roundEnded = AdvanceTurn(table);
-
-                            if (oldSeat != -1)
+                            if (player.MissedTurns >= 3)
                             {
-                                var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-                                _ = hubCtx.Clients.Group(table.TableId).SendAsync("PlayerStoodUp", oldSeat);
-                                _ = hubCtx.Clients.Group(table.TableId).SendAsync("TableStateUpdated", table);
-                                _ = CheckAndProcessWaitlistAsync(table.TableId);
-                            }
+                                player.Chips += player.PendingRebuy;
+                                player.PendingRebuy = 0;
 
-                            if (chipsToReturn > 0 && !string.IsNullOrEmpty(uId))
-                            {
-                                string tId = table.TableId;
-                                _ = Task.Run(async () =>
+                                decimal chipsToReturn = player.Chips;
+                                string uId = player.UserId;
+                                int oldSeat = player.Seat;
+
+                                PublishHandToRabbitMq(table, timeoutSeat, 0, 0, 0, false, 0);
+
+                                player.Status = "out";
+                                player.IsSeated = false;
+                                player.Seat = -1;
+                                player.LeaveNextHand = false;
+                                player.TotalCashOut += player.Chips;
+                                player.LastChips = player.Chips;
+                                player.Chips = 0;
+                                player.LastActiveAt = now;
+                                player.MissedTurns = 0;
+
+                                roundEnded = AdvanceTurn(table);
+                                if (roundEnded)
                                 {
-                                    var result = await _walletService.AddCashOutAsync(uId, chipsToReturn, tId);
-                                    if (result.Success)
-                                    {
-                                        var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-                                        await hubCtx.Clients.Group($"user_{uId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
-                                    }
-                                });
-                            }
-                        }
-                        else
-                        {
-                            player.Status = "out";
-                            table.Phase = "resolving";
+                                    table.Phase = "resolving";
+                                    table.CenterCard = "Hidden";
+                                }
+                                else
+                                {
+                                    table.CenterCard = "Hidden";
+                                }
 
-                            PublishHandToRabbitMq(table, timeoutSeat, 0, 0, 0, false, 0);
-                            roundEnded = AdvanceTurn(table);
+                                if (oldSeat != -1)
+                                {
+                                    var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+                                    _ = hubCtx.Clients.Group(table.TableId).SendAsync("PlayerStoodUp", oldSeat);
+                                    _ = BroadcastTableStateAsync(table.TableId);
+                                    _ = CheckAndProcessWaitlistAsync(table.TableId);
+                                }
+
+                                if (chipsToReturn > 0 && !string.IsNullOrEmpty(uId))
+                                {
+                                    _ = SafeCashOutAsync(uId, chipsToReturn, table.TableId, table.IsDemo);
+                                }
+                            }
+                            else
+                            {
+                                player.Status = "out";
+                                PublishHandToRabbitMq(table, timeoutSeat, 0, 0, 0, false, 0);
+                                roundEnded = AdvanceTurn(table);
+                                
+                                if (roundEnded)
+                                {
+                                    table.Phase = "resolving";
+                                    table.CenterCard = "Hidden";
+                                }
+                                else
+                                {
+                                    table.CenterCard = "Hidden";
+                                }
+                            }
                         }
                     }
                 }
-
-                table.Players.RemoveAll(p => !p.IsSeated && string.IsNullOrEmpty(p.ConnectionId) && p.LastActiveAt < DateTime.UtcNow.AddHours(-6));
             }
 
             if (isTimeout)
             {
                 _ = HandleServerTimeoutAsync(table.TableId, timeoutSeat, roundEnded);
             }
+
+            List<int> seatsFreed = new List<int>();
+            lock (table.Players)
+            {
+                var zeroChipPlayers = table.Players.Where(p =>
+                    p != null &&
+                    p.IsSeated &&
+                    p.Chips <= 0 &&
+                    p.PendingRebuy <= 0 &&
+                    p.Status != "playing" &&
+                    (now - p.LastActiveAt).TotalSeconds >= 30
+                ).ToList();
+
+                foreach (var p in zeroChipPlayers)
+                {
+                    p.IsSeated = false;
+                    int oldSeat = p.Seat;
+                    p.Seat = -1;
+                    p.Status = "waiting";
+                    p.LeaveNextHand = false;
+
+                    if (p.Cards != null) p.Cards.Clear();
+
+                    p.LastActiveAt = now;
+                    p.MissedTurns = 0;
+
+                    seatsFreed.Add(oldSeat);
+                }
+            }
+
+            if (seatsFreed.Any())
+            {
+                var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+                foreach (var s in seatsFreed)
+                {
+                    _ = hubCtx.Clients.Group(table.TableId).SendAsync("PlayerStoodUp", s);
+                }
+                _ = BroadcastTableStateAsync(table.TableId);
+                _ = CheckAndProcessWaitlistAsync(table.TableId);
+            }
+
+            if (shouldCleanup)
+            {
+                lock (table.Players)
+                {
+                    table.Players.RemoveAll(p => p != null && !p.IsSeated && string.IsNullOrEmpty(p.ConnectionId) && p.LastActiveAt < now.AddHours(-6));
+                }
+            }
+        }
+
+        if (shouldCleanup)
+        {
+            _lastCleanupTime = now;
         }
     }
 
@@ -244,19 +400,41 @@ public class GameManager
         var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
         await hubContext.Clients.Group(tableId).SendAsync("PlayerSkipped", seat);
 
-        await ProcessNextRoundLoop(tableId, roundEnded, 2000);
+        if (roundEnded)
+        {
+            await ProcessNextRoundLoop(tableId, true, 7000);
+        }
+        else
+        {
+            var table = GetOrCreateTable(tableId);
+            lock (table.Players)
+            {
+                table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+            }
+            await BroadcastTableStateAsync(tableId);
+        }
     }
 
     public async Task ProcessNextRoundLoop(string tableId, bool roundEnded, int delayMs)
     {
-        var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-
         var resolvingState = GetOrCreateTable(tableId);
+        int nextTurn = -1;
+
         lock (resolvingState.Players)
         {
-            resolvingState.Phase = "resolving";
+            if (roundEnded)
+            {
+                resolvingState.Phase = "resolving";
+            }
+            else
+            {
+                nextTurn = resolvingState.CurrentTurnSeat;
+                resolvingState.CurrentTurnSeat = -1; 
+            }
+            resolvingState.TurnEndTime = DateTime.UtcNow.AddMilliseconds(delayMs);
         }
-        await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", resolvingState);
+        
+        await BroadcastTableStateAsync(tableId);
 
         await Task.Delay(delayMs);
 
@@ -267,15 +445,20 @@ public class GameManager
 
             lock (resolvingState.Players)
             {
-                foreach (var p in resolvingState.Players)
+                foreach (var p in resolvingState.Players.Where(x => x != null))
                 {
                     p.Status = "waiting";
-                    p.Cards.Clear();
+                    if (p.Cards != null) p.Cards.Clear();
 
                     if (p.PendingRebuy > 0)
                     {
                         p.Chips += p.PendingRebuy;
                         p.PendingRebuy = 0;
+                    }
+
+                    if (p.Chips <= 0 && p.IsSeated)
+                    {
+                        p.LastActiveAt = DateTime.UtcNow;
                     }
 
                     if (p.LeaveNextHand)
@@ -295,20 +478,14 @@ public class GameManager
 
                         if (oldSeat != -1)
                         {
+                            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
                             _ = hubContext.Clients.Group(tableId).SendAsync("PlayerStoodUp", oldSeat);
                             seatFreed = true;
                         }
 
                         if (refund > 0 && !string.IsNullOrEmpty(uId))
                         {
-                            cashoutTasks.Add(Task.Run(async () => {
-                                var result = await _walletService.AddCashOutAsync(uId, refund, tableId);
-                                if (result.Success)
-                                {
-                                    var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-                                    await hubCtx.Clients.Group($"user_{uId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
-                                }
-                            }));
+                            cashoutTasks.Add(SafeCashOutAsync(uId, refund, tableId, resolvingState.IsDemo));
                         }
                     }
                 }
@@ -323,32 +500,26 @@ public class GameManager
 
             if (seatFreed) _ = CheckAndProcessWaitlistAsync(tableId);
 
-            if (CheckAndStartGame(tableId))
-            {
-                var dealingState = GetOrCreateTable(tableId);
-                await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", dealingState);
-            }
-            else
-            {
-                var finalWaitingState = GetOrCreateTable(tableId);
-                await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", finalWaitingState);
-            }
+            CheckAndStartGame(tableId);
+            await BroadcastTableStateAsync(tableId);
         }
         else
         {
-            var nextTurnState = GetOrCreateTable(tableId);
-            lock (nextTurnState.Players)
+            lock (resolvingState.Players)
             {
-                nextTurnState.Phase = "betting";
-                nextTurnState.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+                resolvingState.CurrentTurnSeat = nextTurn;
+                resolvingState.Phase = "betting";
+                resolvingState.CenterCard = "Hidden";
+                resolvingState.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
             }
-            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", nextTurnState);
+            await BroadcastTableStateAsync(tableId);
         }
     }
 
     public TableState GetOrCreateTable(string tableId)
     {
-        if (!_tables.ContainsKey(tableId))
+        string safeTableId = tableId ?? string.Empty;
+        if (!_tables.ContainsKey(safeTableId))
         {
             int maxPlayers = 6;
             decimal rake = 0;
@@ -356,25 +527,34 @@ public class GameManager
             decimal ante = 10;
             string tableName = string.Empty;
             DateTime expiresAt = DateTime.UtcNow.AddHours(12);
+            bool isDemo = false;
 
-            using (var scope = _scopeFactory.CreateScope())
+            try
             {
-                var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                var dbTable = dbContext.GameTables.FirstOrDefault(t => t.Id.ToString() == tableId);
-                if (dbTable != null)
+                using (var scope = _scopeFactory.CreateScope())
                 {
-                    maxPlayers = dbTable.MaxPlayers;
-                    rake = dbTable.Rake;
-                    minBuyIn = dbTable.MinBuyIn;
-                    ante = dbTable.Ante;
-                    tableName = dbTable.Name;
-                    expiresAt = dbTable.CreatedAt.AddHours(dbTable.DurationHours);
+                    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                    var dbTable = dbContext.GameTables.FirstOrDefault(t => t.Id.ToString() == safeTableId);
+                    if (dbTable != null)
+                    {
+                        maxPlayers = dbTable.MaxPlayers;
+                        rake = dbTable.Rake;
+                        minBuyIn = dbTable.MinBuyIn;
+                        ante = dbTable.Ante;
+                        tableName = dbTable.Name;
+                        expiresAt = dbTable.CreatedAt.AddHours(dbTable.DurationHours);
+                        isDemo = dbTable.IsDemo;
+                    }
                 }
             }
-
-            _tables.TryAdd(tableId, new TableState
+            catch (Exception ex)
             {
-                TableId = tableId,
+                _logger.LogError(ex, $"Erro ao buscar a mesa {safeTableId} no banco. Usando valores padrões.");
+            }
+
+            _tables.TryAdd(safeTableId, new TableState
+            {
+                TableId = safeTableId,
                 Name = tableName,
                 MaxPlayers = maxPlayers,
                 Rake = rake,
@@ -382,18 +562,20 @@ public class GameManager
                 MinBet = ante,
                 ExpiresAt = expiresAt,
                 Players = new List<PlayerState>(),
-                Waitlist = new List<WaitlistEntry>()
+                Waitlist = new List<WaitlistEntry>(),
+                IsDemo = isDemo
             });
         }
-        return _tables[tableId];
+        return _tables[safeTableId];
     }
 
     public void AddPlayerToTable(string tableId, PlayerState player)
     {
+        if (player == null) return;
         var table = GetOrCreateTable(tableId);
         lock (table.Players)
         {
-            var existingPlayer = table.Players.FirstOrDefault(p => p.UserId == player.UserId);
+            var existingPlayer = table.Players.FirstOrDefault(p => p != null && p.UserId == player.UserId);
 
             if (existingPlayer != null)
             {
@@ -414,7 +596,7 @@ public class GameManager
         var table = GetOrCreateTable(tableId);
         lock (table.Players)
         {
-            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+            var player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
             if (player != null)
             {
                 player.Avatar = newAvatar;
@@ -428,9 +610,6 @@ public class GameManager
     {
         string? tableId = null;
         int logicalSeat = -1;
-        decimal chipsToReturn = 0;
-        string userId = string.Empty;
-        bool cashoutNow = false;
         bool freedReservation = false;
         bool wasInWaitlist = false;
 
@@ -440,54 +619,11 @@ public class GameManager
         {
             lock (table.Players)
             {
-                var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+                var player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
                 if (player != null)
                 {
                     tableId = table.TableId;
-                    logicalSeat = player.Seat;
-                    userId = player.UserId;
                     targetTable = table;
-
-                    if (player.IsSeated)
-                    {
-                        bool safeToLeaveInstantly = (table.Phase == "waiting" || player.Status == "done" || player.Status == "out");
-
-                        if (safeToLeaveInstantly)
-                        {
-                            player.Chips += player.PendingRebuy;
-                            player.PendingRebuy = 0;
-
-                            chipsToReturn = player.Chips;
-                            cashoutNow = true;
-
-                            player.TotalCashOut += player.Chips;
-                            player.LastChips = player.Chips;
-                            player.Chips = 0;
-                            player.IsSeated = false;
-                            player.Seat = -1;
-                            player.Status = "waiting";
-                            player.MissedTurns = 0;
-                        }
-                        else
-                        {
-                            player.LeaveNextHand = true;
-
-                            if (player.Status == "playing")
-                            {
-                                player.Status = "out";
-
-                                if (table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
-                                {
-                                    table.TurnEndTime = null;
-                                    table.Phase = "resolving";
-
-                                    PublishHandToRabbitMq(table, player.Seat, 0, 0, 0, false, 0);
-                                    bool roundEnded = AdvanceTurn(table);
-                                    _ = ProcessNextRoundLoop(table.TableId, roundEnded, 2000);
-                                }
-                            }
-                        }
-                    }
 
                     if (table.Waitlist != null && table.Waitlist.Any(w => w.UserId == player.UserId))
                     {
@@ -510,35 +646,18 @@ public class GameManager
 
         if (targetTable != null)
         {
-            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+            await BroadcastTableStateAsync(targetTable.TableId);
 
-            if (cashoutNow && logicalSeat != -1)
+            if (freedReservation || wasInWaitlist)
             {
-                _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("PlayerStoodUp", logicalSeat);
-                _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("TableStateUpdated", targetTable);
                 _ = CheckAndProcessWaitlistAsync(targetTable.TableId);
-            }
-            else if (freedReservation || wasInWaitlist)
-            {
-                _ = hubContext.Clients.Group(targetTable.TableId).SendAsync("TableStateUpdated", targetTable);
-                if (freedReservation) _ = CheckAndProcessWaitlistAsync(targetTable.TableId);
-            }
-        }
-
-        if (cashoutNow && chipsToReturn > 0 && !string.IsNullOrEmpty(userId) && !string.IsNullOrEmpty(tableId))
-        {
-            var result = await _walletService.AddCashOutAsync(userId, chipsToReturn, tableId);
-            if (result.Success)
-            {
-                var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-                await hubContext.Clients.Group($"user_{userId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
             }
         }
 
         return (tableId, logicalSeat);
     }
 
-    public async Task<bool> SitPlayer(string tableId, string connectionId, int seat, decimal buyIn)
+    public async Task<bool> SitPlayer(string tableId, string connectionId, int seat, decimal buyIn, string localUserId = "")
     {
         try
         {
@@ -548,35 +667,43 @@ public class GameManager
             lock (table.Players)
             {
                 if (seat >= table.MaxPlayers) return false;
-                if (table.Players.Count(p => p.IsSeated) >= table.MaxPlayers) return false;
-                if (table.Players.Any(p => p.Seat == seat && p.IsSeated)) return false;
+                if (table.Players.Count(p => p != null && p.IsSeated) >= table.MaxPlayers) return false;
+                if (table.Players.Any(p => p != null && p.Seat == seat && p.IsSeated)) return false;
 
-                player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+                player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
+
+                if (player == null && !string.IsNullOrEmpty(localUserId))
+                {
+                    player = table.Players.FirstOrDefault(p => p != null && p.UserId == localUserId);
+                    if (player != null) player.ConnectionId = connectionId ?? "";
+                }
+
                 if (player == null || player.IsSeated) return false;
+                if (player.Status == "sitting") return false;
 
                 if (!string.IsNullOrEmpty(table.ReservedForUserId) && table.ReservedForUserId != player.UserId)
-                {
                     return false;
-                }
+
+                player.Status = "sitting";
             }
 
-            var result = await _walletService.DeductBuyInAsync(player.UserId, buyIn, tableId);
-            if (!result.Success) return false;
+            var result = await _walletService.DeductBuyInAsync(player.UserId, buyIn, tableId, table.IsDemo);
+
+            if (!result.Success)
+            {
+                lock (table.Players) { player.Status = "waiting"; }
+                return false;
+            }
 
             var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
             await hubContext.Clients.Group($"user_{player.UserId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
 
             lock (table.Players)
             {
-                if (table.Players.Any(p => p.Seat == seat && p.IsSeated))
+                if (table.Players.Any(p => p != null && p.Seat == seat && p.IsSeated))
                 {
-                    _ = Task.Run(async () => {
-                        var refundResult = await _walletService.AddCashOutAsync(player.UserId, buyIn, tableId);
-                        if (refundResult.Success)
-                        {
-                            await hubContext.Clients.Group($"user_{player.UserId}").SendAsync("WalletBalanceUpdated", refundResult.NewBalance);
-                        }
-                    });
+                    player.Status = "waiting";
+                    _ = SafeCashOutAsync(player.UserId, buyIn, tableId, table.IsDemo);
                     return false;
                 }
 
@@ -597,22 +724,16 @@ public class GameManager
                 player.MissedTurns = 0;
 
                 if (table.ReservedForUserId == player.UserId)
-                {
                     table.ReservedForUserId = null;
-                }
 
-                // 👇 AQUI o jogador é definitivamente removido da fila, pois sentou com sucesso!
                 if (table.Waitlist != null)
-                {
                     table.Waitlist.RemoveAll(w => w.UserId == player.UserId);
-                }
             }
 
             _ = hubContext.Clients.Group(tableId).SendAsync("PlayerSatDown", seat);
 
             CheckAndStartGame(tableId);
-            var state = GetOrCreateTable(tableId);
-            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", state);
+            await BroadcastTableStateAsync(tableId);
 
             _ = CheckAndProcessWaitlistAsync(tableId);
 
@@ -620,12 +741,12 @@ public class GameManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[CRÍTICO] Erro ao sentar jogador: {ex.Message}");
+            _logger.LogError(ex, $"[CRÍTICO] Erro ao sentar jogador na mesa {tableId}");
             return false;
         }
     }
 
-    public async Task<bool> Rebuy(string tableId, string connectionId, decimal amount)
+    public async Task<bool> Rebuy(string tableId, string connectionId, decimal amount, string localUserId = "")
     {
         try
         {
@@ -634,11 +755,17 @@ public class GameManager
 
             lock (table.Players)
             {
-                player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+                player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
+                if (player == null && !string.IsNullOrEmpty(localUserId))
+                {
+                    player = table.Players.FirstOrDefault(p => p != null && p.UserId == localUserId);
+                    if (player != null) player.ConnectionId = connectionId ?? "";
+                }
+
                 if (player == null || !player.IsSeated) return false;
             }
 
-            var result = await _walletService.DeductBuyInAsync(player.UserId, amount, tableId);
+            var result = await _walletService.DeductBuyInAsync(player.UserId, amount, tableId, table.IsDemo);
             if (!result.Success) return false;
 
             var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
@@ -661,34 +788,39 @@ public class GameManager
             }
 
             CheckAndStartGame(tableId);
-            var state = GetOrCreateTable(tableId);
-            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", state);
+            await BroadcastTableStateAsync(tableId);
 
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[CRÍTICO] Erro no Rebuy: {ex.Message}");
+            _logger.LogError(ex, $"[CRÍTICO] Erro no Rebuy na mesa {tableId}");
             return false;
         }
     }
 
-    public async Task<bool> StandUp(string tableId, string connectionId)
+    public async Task<bool> StandUp(string tableId, string connectionId, string localUserId = "")
     {
         var table = GetOrCreateTable(tableId);
         decimal chipsToReturn = 0;
-        string userId = string.Empty;
+        string actualUserId = string.Empty;
         bool wasSeated = false;
         bool cashoutNow = false;
         int oldSeat = -1;
 
         lock (table.Players)
         {
-            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+            var player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
+            if (player == null && !string.IsNullOrEmpty(localUserId))
+            {
+                player = table.Players.FirstOrDefault(p => p != null && p.UserId == localUserId);
+                if (player != null) player.ConnectionId = connectionId ?? "";
+            }
+
             if (player != null && player.IsSeated)
             {
                 wasSeated = true;
-                userId = player.UserId;
+                actualUserId = player.UserId;
                 oldSeat = player.Seat;
 
                 bool safeToLeaveInstantly = (table.Phase == "waiting" || player.Status == "done" || player.Status == "out");
@@ -704,7 +836,7 @@ public class GameManager
                     player.IsSeated = false;
                     player.Seat = -1;
                     player.Status = "waiting";
-                    player.Cards.Clear();
+                    if (player.Cards != null) player.Cards.Clear();
                     player.LeaveNextHand = false;
 
                     player.TotalCashOut += player.Chips;
@@ -720,11 +852,25 @@ public class GameManager
                     if (player.Status == "playing" && table.Phase == "betting" && table.CurrentTurnSeat == player.Seat)
                     {
                         player.Status = "out";
-                        table.TurnEndTime = null;
-                        table.Phase = "resolving";
                         PublishHandToRabbitMq(table, player.Seat, 0, 0, 0, false, 0);
                         bool roundEnded = AdvanceTurn(table);
-                        _ = ProcessNextRoundLoop(table.TableId, roundEnded, 2000);
+                        
+                        if (roundEnded)
+                        {
+                            table.TurnEndTime = null;
+                            table.Phase = "resolving";
+                        }
+                        else
+                        {
+                            // 🔥 CORREÇÃO: Esconde o Vira e recomeça o relógio para o próximo!
+                            table.CenterCard = "Hidden";
+                            table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+                        }
+                        
+                        var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+                        _ = hubContext.Clients.Group(tableId).SendAsync("PlayerSkipped", player.Seat);
+
+                        _ = ProcessNextRoundLoop(table.TableId, roundEnded, 7000); 
                     }
                 }
             }
@@ -734,18 +880,18 @@ public class GameManager
         {
             var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
             _ = hubContext.Clients.Group(tableId).SendAsync("PlayerStoodUp", oldSeat);
-            _ = hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+            _ = BroadcastTableStateAsync(tableId);
 
             _ = CheckAndProcessWaitlistAsync(tableId);
         }
 
-        if (cashoutNow && chipsToReturn > 0 && !string.IsNullOrEmpty(userId))
+        if (cashoutNow && chipsToReturn > 0 && !string.IsNullOrEmpty(actualUserId))
         {
-            var result = await _walletService.AddCashOutAsync(userId, chipsToReturn, tableId);
+            var result = await _walletService.AddCashOutAsync(actualUserId, chipsToReturn, tableId, table.IsDemo);
             if (result.Success)
             {
                 var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-                await hubContext.Clients.Group($"user_{userId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
+                await hubContext.Clients.Group($"user_{actualUserId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
                 return true;
             }
             return false;
@@ -754,12 +900,17 @@ public class GameManager
         return wasSeated;
     }
 
-    public void SetLeaveNextHand(string tableId, string connectionId, bool willLeave)
+    public void SetLeaveNextHand(string tableId, string connectionId, bool willLeave, string localUserId = "")
     {
         var table = GetOrCreateTable(tableId);
         lock (table.Players)
         {
-            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+            var player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
+            if (player == null && !string.IsNullOrEmpty(localUserId))
+            {
+                player = table.Players.FirstOrDefault(p => p != null && p.UserId == localUserId);
+            }
+
             if (player != null && player.IsSeated)
             {
                 player.LeaveNextHand = willLeave;
@@ -776,12 +927,13 @@ public class GameManager
             bool chargeAnte = table.Pot <= 0;
 
             var eligiblePlayers = table.Players.Where(p =>
-                p.IsSeated && p.Chips > 0 && (!chargeAnte || p.Chips >= table.MinBet)
+                p != null && p.IsSeated && p.Chips > 0 && (!chargeAnte || p.Chips >= table.MinBet)
             ).OrderBy(p => p.Seat).ToList();
 
             if (eligiblePlayers.Count >= 2 && table.Phase == "waiting")
             {
                 table.Phase = "dealing";
+                table.TurnEndTime = DateTime.UtcNow.AddSeconds(3);
 
                 var ranks = new[] { "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K" };
                 var suits = new[] { "♥", "♦", "♣", "♠" };
@@ -805,10 +957,18 @@ public class GameManager
                     p.LastActiveAt = DateTime.UtcNow;
                 }
 
-                table.CenterCard = deck[0];
+                table.CenterCard = "Hidden";
                 _tableDecks[tableId] = deck;
 
-                table.CurrentTurnSeat = eligiblePlayers[0].Seat;
+                int lastActionSeat = _tableLastActionSeat.GetOrAdd(tableId, -1);
+
+                var nextStarter = eligiblePlayers.FirstOrDefault(p => p.Seat > lastActionSeat);
+                if (nextStarter == null)
+                {
+                    nextStarter = eligiblePlayers[0];
+                }
+
+                table.CurrentTurnSeat = nextStarter.Seat;
 
                 _ = TransitionToBettingAsync(tableId);
 
@@ -836,39 +996,59 @@ public class GameManager
 
         if (shouldBroadcast)
         {
-            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
-            await hubContext.Clients.Group(tableId).SendAsync("TableStateUpdated", table);
+            await BroadcastTableStateAsync(tableId);
         }
     }
 
-    public bool SkipTurn(string tableId, string connectionId, out int seat, out bool roundEnded)
+    public bool SkipTurn(string tableId, string connectionId, out int seat, out bool roundEnded, string localUserId = "")
     {
         seat = -1;
         roundEnded = false;
         var table = GetOrCreateTable(tableId);
         lock (table.Players)
         {
-            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+            var player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
+            if (player == null && !string.IsNullOrEmpty(localUserId))
+            {
+                player = table.Players.FirstOrDefault(p => p != null && p.UserId == localUserId);
+                if (player != null) player.ConnectionId = connectionId ?? "";
+            }
 
             if (player == null || table.CurrentTurnSeat < 0 || player.Seat != table.CurrentTurnSeat || player.Status != "playing")
                 return false;
 
             seat = player.Seat;
+
+            _tableLastActionSeat[tableId] = seat;
+
             player.Status = "out";
             table.TurnEndTime = null;
-            table.Phase = "resolving";
             player.LastActiveAt = DateTime.UtcNow;
-
             player.MissedTurns = 0;
 
             PublishHandToRabbitMq(table, seat, 0, 0, 0, false, 0);
 
             roundEnded = AdvanceTurn(table);
+            
+            if (roundEnded)
+            {
+                table.Phase = "resolving";
+            }
+            else
+            {
+                // 🔥 CORREÇÃO: Esconde o Vira e recomeça o relógio para o próximo!
+                table.CenterCard = "Hidden";
+                table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+            }
+
+            var hubContext = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+            _ = hubContext.Clients.Group(tableId).SendAsync("PlayerSkipped", seat);
+
             return true;
         }
     }
 
-    public bool PlaceBet(string tableId, string connectionId, decimal amount, out int seat, out bool isWin, out bool potBroken, out bool roundEnded, out string[] playedCards, out string centerCardRevealed)
+    public bool PlaceBet(string tableId, string connectionId, decimal amount, out int seat, out bool isWin, out bool potBroken, out bool roundEnded, out string[] playedCards, out string centerCardRevealed, string localUserId = "")
     {
         seat = -1;
         isWin = false;
@@ -881,23 +1061,43 @@ public class GameManager
 
         lock (table.Players)
         {
-            var player = table.Players.FirstOrDefault(p => p.ConnectionId == connectionId);
+            var player = table.Players.FirstOrDefault(p => p != null && p.ConnectionId == connectionId);
+            if (player == null && !string.IsNullOrEmpty(localUserId))
+            {
+                player = table.Players.FirstOrDefault(p => p != null && p.UserId == localUserId);
+                if (player != null) player.ConnectionId = connectionId ?? "";
+            }
 
             if (player == null || table.CurrentTurnSeat < 0 || player.Seat != table.CurrentTurnSeat || player.Status != "playing")
                 return false;
 
-            if (player.Cards == null || player.Cards.Count < 2 || string.IsNullOrEmpty(table.CenterCard))
+            playedCards = player.Cards?.ToArray() ?? Array.Empty<string>();
+
+            if (playedCards.Length < 2)
                 return false;
 
             seat = player.Seat;
-            table.TurnEndTime = null;
-            table.Phase = "resolving";
-            player.LastActiveAt = DateTime.UtcNow;
 
+            _tableLastActionSeat[tableId] = seat;
+
+            table.TurnEndTime = null;
+            player.LastActiveAt = DateTime.UtcNow;
             player.MissedTurns = 0;
 
-            playedCards = player.Cards.ToArray();
-            centerCardRevealed = table.CenterCard;
+            if (table.CenterCard == "Hidden")
+            {
+                if (_tableDecks.TryGetValue(tableId, out var deck) && deck != null && deck.Count > 0)
+                {
+                    table.CenterCard = deck[0];
+                    deck.RemoveAt(0);
+                }
+                else
+                {
+                    table.CenterCard = "A♠";
+                }
+            }
+
+            centerCardRevealed = table.CenterCard ?? "A♠";
 
             if (amount > player.Chips) amount = player.Chips;
             if (amount > table.Pot) amount = table.Pot;
@@ -905,9 +1105,9 @@ public class GameManager
             player.Chips -= amount;
             table.Pot += amount;
 
-            int val1 = GetCardValue(player.Cards[0]);
-            int val2 = GetCardValue(player.Cards[1]);
-            int centerVal = GetCardValue(table.CenterCard);
+            int val1 = GetCardValue(playedCards.ElementAtOrDefault(0));
+            int val2 = GetCardValue(playedCards.ElementAtOrDefault(1));
+            int centerVal = GetCardValue(centerCardRevealed);
 
             int minVal = Math.Min(val1, val2);
             int maxVal = Math.Max(val1, val2);
@@ -937,41 +1137,51 @@ public class GameManager
 
             PublishHandToRabbitMq(table, seat, amount, rabbitWon, rabbitNet, isWin, rabbitRake);
 
-            if (_tableDecks.TryGetValue(tableId, out var deck))
-            {
-                if (deck.Count > 0) deck.RemoveAt(0);
-                if (deck.Count > 0) table.CenterCard = deck[0];
-            }
-
             if (table.Pot <= 0)
             {
                 table.Pot = 0;
                 potBroken = true;
-                foreach (var p in table.Players.Where(x => x.IsSeated))
+                foreach (var p in table.Players.Where(x => x != null && x.IsSeated).ToList())
                 {
-                    if (p.Chips >= table.MinBet)
+                    if (p.Chips > 0)
                     {
-                        p.Chips -= table.MinBet;
-                        table.Pot += table.MinBet;
+                        decimal deduction = Math.Min(p.Chips, table.MinBet);
+                        p.Chips -= deduction;
+                        table.Pot += deduction;
                     }
                 }
             }
 
             player.Status = "done";
             roundEnded = AdvanceTurn(table);
+            
+            if (roundEnded)
+            {
+                table.Phase = "resolving";
+            }
+            else
+            {
+                // 🔥 CORREÇÃO: Esconde o Vira e recomeça o relógio para o próximo!
+                table.CenterCard = "Hidden";
+                table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
+            }
+            
             return true;
         }
     }
 
     private void PublishHandToRabbitMq(TableState table, int activeSeat, decimal betAmount, decimal wonAmount, decimal netProfit, bool isWinner, decimal totalRake)
     {
-        var activePlayer = table.Players.FirstOrDefault(p => p.Seat == activeSeat);
+        var activePlayer = table.Players.FirstOrDefault(p => p != null && p.Seat == activeSeat);
         if (activePlayer == null) return;
+
+        var holeCardsSafe = activePlayer.Cards?.ToList() ?? new List<string>();
+        var centerCardSafe = table.CenterCard ?? "Unknown";
 
         var handMessage = new HandCompletedMessage
         {
-            GameTableId = Guid.Parse(table.TableId),
-            CommunityCards = new List<string> { table.CenterCard },
+            GameTableId = Guid.TryParse(table.TableId, out var tid) ? tid : Guid.Empty,
+            CommunityCards = new List<string> { centerCardSafe },
             TotalPot = table.Pot,
             TotalRake = totalRake,
             Players = new List<PlayerHandResult>
@@ -979,7 +1189,8 @@ public class GameManager
                 new PlayerHandResult
                 {
                     PlayerId = Guid.TryParse(activePlayer.UserId, out var uid) ? uid : Guid.Empty,
-                    HoleCards = activePlayer.Cards.ToList(),
+                    PlayerName = activePlayer.Name ?? "Livre",
+                    HoleCards = holeCardsSafe,
                     BetAmount = betAmount,
                     WonAmount = wonAmount,
                     NetProfit = netProfit,
@@ -996,7 +1207,7 @@ public class GameManager
         for (int i = 1; i <= table.MaxPlayers; i++)
         {
             int nextSeat = (table.CurrentTurnSeat + i) % table.MaxPlayers;
-            var playerInSeat = table.Players.FirstOrDefault(p => p.Seat == nextSeat && p.IsSeated);
+            var playerInSeat = table.Players.FirstOrDefault(p => p != null && p.Seat == nextSeat && p.IsSeated);
 
             if (playerInSeat != null && playerInSeat.Status == "playing")
             {
@@ -1009,17 +1220,17 @@ public class GameManager
         return true;
     }
 
-    private int GetCardValue(string card)
+    private int GetCardValue(string? card)
     {
-        if (string.IsNullOrEmpty(card)) return 0;
+        if (string.IsNullOrEmpty(card) || card.Length < 2) return 0;
         var ranks = new List<string> { "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K" };
         string rank = card.Substring(0, card.Length - 1);
-        return ranks.IndexOf(rank);
+        return Math.Max(0, ranks.IndexOf(rank));
     }
 
     public List<string> GetDevTableDeck(string tableId)
     {
-        if (_tableDecks.TryGetValue(tableId, out var deck))
+        if (_tableDecks.TryGetValue(tableId ?? "", out var deck) && deck != null)
         {
             return deck;
         }
@@ -1032,7 +1243,7 @@ public class GameManager
 
         lock (table.Players)
         {
-            if (!_tableDecks.TryGetValue(tableId, out var deck))
+            if (!_tableDecks.TryGetValue(tableId ?? "", out var deck) || deck == null)
                 return false;
 
             table.CenterCard = newCenterCard;
@@ -1052,6 +1263,27 @@ public class GameManager
             }
 
             return true;
+        }
+    }
+
+    private async Task SafeCashOutAsync(string userId, decimal amount, string tableId, bool isDemo)
+    {
+        try
+        {
+            var result = await _walletService.AddCashOutAsync(userId, amount, tableId, isDemo);
+            if (result.Success)
+            {
+                var hubCtx = _serviceProvider.GetRequiredService<IHubContext<GameHub>>();
+                await hubCtx.Clients.Group($"user_{userId}").SendAsync("WalletBalanceUpdated", result.NewBalance);
+            }
+            else
+            {
+                _logger.LogCritical($"FALHA CRÍTICA AO DEVOLVER FICHAS! User: {userId}, Amount: {amount}, Table: {tableId}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, $"FALHA CRÍTICA DE CONEXÃO AO DEVOLVER FICHAS! User: {userId}, Amount: {amount}, Table: {tableId}");
         }
     }
 }
