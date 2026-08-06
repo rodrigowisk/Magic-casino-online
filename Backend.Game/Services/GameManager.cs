@@ -65,7 +65,6 @@ public class GameManager
         var table = GetOrCreateTable(tableId);
         
         var observerTable = CloneAndMaskTable(table, null);
-        
         List<string> seatedConnections = new List<string>();
         
         lock (table.Players)
@@ -74,7 +73,13 @@ public class GameManager
             {
                 seatedConnections.Add(p.ConnectionId);
                 var playerTable = CloneAndMaskTable(table, p.UserId);
-                hubContext.Clients.Client(p.ConnectionId).SendAsync("TableStateUpdated", playerTable);
+                
+                _ = hubContext.Clients.Client(p.ConnectionId).SendAsync("TableStateUpdated", playerTable);
+                
+                if (!string.IsNullOrEmpty(p.UserId))
+                {
+                    _ = hubContext.Clients.Group($"user_{p.UserId}").SendAsync("TableStateUpdated", playerTable);
+                }
             }
         }
         
@@ -92,7 +97,7 @@ public class GameManager
             MinBet = original.MinBet,
             CurrentTurnSeat = original.CurrentTurnSeat,
             CenterCard = original.CenterCard,
-            TurnEndTime = original.TurnEndTime,
+            TurnEndTime = original.TurnEndTime, 
             MaxPlayers = original.MaxPlayers,
             Rake = original.Rake,
             MinBuyIn = original.MinBuyIn,
@@ -100,12 +105,17 @@ public class GameManager
             CoverImage = original.CoverImage,
             IsDemo = original.IsDemo,
             ReservedForUserId = original.ReservedForUserId,
-            Waitlist = original.Waitlist?.ToList() ?? new List<WaitlistEntry>(),
+            Waitlist = new List<WaitlistEntry>(),
             Players = new List<PlayerState>()
         };
 
         lock (original.Players)
         {
+            if (original.Waitlist != null)
+            {
+                copy.Waitlist = original.Waitlist.ToList();
+            }
+
             foreach (var p in original.Players)
             {
                 var pCopy = new PlayerState
@@ -130,7 +140,7 @@ public class GameManager
 
                 if (p.Cards != null && p.Cards.Any())
                 {
-                    if (p.UserId == targetUserId)
+                    if (!string.IsNullOrEmpty(p.UserId) && p.UserId == targetUserId)
                     {
                         pCopy.Cards.AddRange(p.Cards);
                     }
@@ -252,14 +262,15 @@ public class GameManager
             int timeoutSeat = -1;
             bool roundEnded = false;
 
-            if (table.Phase == "betting" && table.TurnEndTime.HasValue && now >= table.TurnEndTime.Value)
+            if (table.Phase == "betting" && table.CurrentTurnSeat >= 0 && table.TurnEndTime.HasValue && now >= table.TurnEndTime.Value)
             {
                 lock (table.Players)
                 {
-                    if (table.Phase == "betting" && table.TurnEndTime.HasValue && now >= table.TurnEndTime.Value)
+                    if (table.Phase == "betting" && table.CurrentTurnSeat >= 0 && table.TurnEndTime.HasValue && now >= table.TurnEndTime.Value)
                     {
                         isTimeout = true;
                         timeoutSeat = table.CurrentTurnSeat;
+                        var oldTurnEndTime = table.TurnEndTime;
                         table.TurnEndTime = null;
 
                         _tableLastActionSeat[table.TableId] = timeoutSeat;
@@ -422,18 +433,16 @@ public class GameManager
 
         lock (resolvingState.Players)
         {
-            if (roundEnded)
-            {
-                resolvingState.Phase = "resolving";
-            }
-            else
+            resolvingState.Phase = "resolving";
+            resolvingState.TurnEndTime = null;
+
+            if (!roundEnded)
             {
                 nextTurn = resolvingState.CurrentTurnSeat;
                 resolvingState.CurrentTurnSeat = -1; 
             }
-            resolvingState.TurnEndTime = DateTime.UtcNow.AddMilliseconds(delayMs);
         }
-        
+
         await BroadcastTableStateAsync(tableId);
 
         await Task.Delay(delayMs);
@@ -512,6 +521,7 @@ public class GameManager
                 resolvingState.CenterCard = "Hidden";
                 resolvingState.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
             }
+
             await BroadcastTableStateAsync(tableId);
         }
     }
@@ -519,7 +529,8 @@ public class GameManager
     public TableState GetOrCreateTable(string tableId)
     {
         string safeTableId = tableId ?? string.Empty;
-        if (!_tables.ContainsKey(safeTableId))
+        
+        if (!_tables.TryGetValue(safeTableId, out var existingTable) || string.IsNullOrEmpty(existingTable.Name))
         {
             int maxPlayers = 6;
             decimal rake = 0;
@@ -528,44 +539,78 @@ public class GameManager
             string tableName = string.Empty;
             DateTime expiresAt = DateTime.UtcNow.AddHours(12);
             bool isDemo = false;
+            bool dbSuccess = false;
 
             try
             {
                 using (var scope = _scopeFactory.CreateScope())
                 {
                     var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                    var dbTable = dbContext.GameTables.FirstOrDefault(t => t.Id.ToString() == safeTableId);
-                    if (dbTable != null)
+                    
+                    if (Guid.TryParse(safeTableId, out var parsedGuid))
                     {
-                        maxPlayers = dbTable.MaxPlayers;
-                        rake = dbTable.Rake;
-                        minBuyIn = dbTable.MinBuyIn;
-                        ante = dbTable.Ante;
-                        tableName = dbTable.Name;
-                        expiresAt = dbTable.CreatedAt.AddHours(dbTable.DurationHours);
-                        isDemo = dbTable.IsDemo;
+                        var dbTable = dbContext.GameTables.FirstOrDefault(t => t.Id == parsedGuid);
+                        
+                        if (dbTable == null) 
+                        {
+                            dbTable = dbContext.GameTables.FirstOrDefault(t => t.Id.ToString() == safeTableId);
+                        }
+
+                        if (dbTable != null)
+                        {
+                            maxPlayers = dbTable.MaxPlayers;
+                            rake = dbTable.Rake;
+                            minBuyIn = dbTable.MinBuyIn;
+                            ante = dbTable.Ante;
+                            tableName = dbTable.Name;
+                            expiresAt = dbTable.CreatedAt.AddHours(dbTable.DurationHours);
+                            isDemo = dbTable.IsDemo;
+                            dbSuccess = true;
+                        }
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Erro ao buscar a mesa {safeTableId} no banco. Usando valores padrões.");
+                _logger.LogError(ex, $"Erro ao buscar a mesa {safeTableId} no banco. Ela ficará em estado de CARREGAMENTO até a conexão voltar.");
             }
 
-            _tables.TryAdd(safeTableId, new TableState
+            if (existingTable == null)
             {
-                TableId = safeTableId,
-                Name = tableName,
-                MaxPlayers = maxPlayers,
-                Rake = rake,
-                MinBuyIn = minBuyIn,
-                MinBet = ante,
-                ExpiresAt = expiresAt,
-                Players = new List<PlayerState>(),
-                Waitlist = new List<WaitlistEntry>(),
-                IsDemo = isDemo
-            });
+                if (dbSuccess || !string.IsNullOrEmpty(tableName)) 
+                {
+                    existingTable = new TableState
+                    {
+                        TableId = safeTableId,
+                        Name = tableName,
+                        MaxPlayers = maxPlayers,
+                        Rake = rake,
+                        MinBuyIn = minBuyIn,
+                        MinBet = ante,
+                        ExpiresAt = expiresAt,
+                        Players = new List<PlayerState>(),
+                        Waitlist = new List<WaitlistEntry>(),
+                        IsDemo = isDemo
+                    };
+                    _tables.TryAdd(safeTableId, existingTable);
+                }
+                else 
+                {
+                    return new TableState { TableId = safeTableId, Players = new List<PlayerState>() };
+                }
+            }
+            else if (dbSuccess)
+            {
+                existingTable.Name = tableName;
+                existingTable.MaxPlayers = maxPlayers;
+                existingTable.Rake = rake;
+                existingTable.MinBuyIn = minBuyIn;
+                existingTable.MinBet = ante;
+                existingTable.ExpiresAt = expiresAt;
+                existingTable.IsDemo = isDemo;
+            }
         }
+        
         return _tables[safeTableId];
     }
 
@@ -613,7 +658,7 @@ public class GameManager
         bool freedReservation = false;
         bool wasInWaitlist = false;
 
-        TableState targetTable = null;
+        TableState? targetTable = null;
 
         foreach (var table in _tables.Values)
         {
@@ -624,6 +669,7 @@ public class GameManager
                 {
                     tableId = table.TableId;
                     targetTable = table;
+                    logicalSeat = player.Seat;
 
                     if (table.Waitlist != null && table.Waitlist.Any(w => w.UserId == player.UserId))
                     {
@@ -722,6 +768,13 @@ public class GameManager
                 player.LeaveNextHand = false;
                 player.LastActiveAt = DateTime.UtcNow;
                 player.MissedTurns = 0;
+
+                if (table.Pot > 0)
+                {
+                    decimal pingo = Math.Min(table.MinBet, player.Chips);
+                    player.Chips -= pingo;
+                    table.Pot += pingo;
+                }
 
                 if (table.ReservedForUserId == player.UserId)
                     table.ReservedForUserId = null;
@@ -862,7 +915,6 @@ public class GameManager
                         }
                         else
                         {
-                            // 🔥 CORREÇÃO: Esconde o Vira e recomeça o relógio para o próximo!
                             table.CenterCard = "Hidden";
                             table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
                         }
@@ -933,7 +985,7 @@ public class GameManager
             if (eligiblePlayers.Count >= 2 && table.Phase == "waiting")
             {
                 table.Phase = "dealing";
-                table.TurnEndTime = DateTime.UtcNow.AddSeconds(3);
+                table.TurnEndTime = null;
 
                 var ranks = new[] { "A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K" };
                 var suits = new[] { "♥", "♦", "♣", "♠" };
@@ -958,6 +1010,7 @@ public class GameManager
                 }
 
                 table.CenterCard = "Hidden";
+                table.CurrentTurnSeat = -1;
                 _tableDecks[tableId] = deck;
 
                 int lastActionSeat = _tableLastActionSeat.GetOrAdd(tableId, -1);
@@ -968,9 +1021,7 @@ public class GameManager
                     nextStarter = eligiblePlayers[0];
                 }
 
-                table.CurrentTurnSeat = nextStarter.Seat;
-
-                _ = TransitionToBettingAsync(tableId);
+                _ = TransitionToBettingAsync(tableId, nextStarter.Seat);
 
                 return true;
             }
@@ -978,7 +1029,7 @@ public class GameManager
         return false;
     }
 
-    private async Task TransitionToBettingAsync(string tableId)
+    private async Task TransitionToBettingAsync(string tableId, int startingSeat)
     {
         await Task.Delay(3000);
         var table = GetOrCreateTable(tableId);
@@ -989,6 +1040,7 @@ public class GameManager
             if (table.Phase == "dealing")
             {
                 table.Phase = "betting";
+                table.CurrentTurnSeat = startingSeat; 
                 table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
                 shouldBroadcast = true;
             }
@@ -1015,7 +1067,9 @@ public class GameManager
             }
 
             if (player == null || table.CurrentTurnSeat < 0 || player.Seat != table.CurrentTurnSeat || player.Status != "playing")
+            {
                 return false;
+            }
 
             seat = player.Seat;
 
@@ -1036,7 +1090,6 @@ public class GameManager
             }
             else
             {
-                // 🔥 CORREÇÃO: Esconde o Vira e recomeça o relógio para o próximo!
                 table.CenterCard = "Hidden";
                 table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
             }
@@ -1069,12 +1122,16 @@ public class GameManager
             }
 
             if (player == null || table.CurrentTurnSeat < 0 || player.Seat != table.CurrentTurnSeat || player.Status != "playing")
+            {
                 return false;
+            }
 
             playedCards = player.Cards?.ToArray() ?? Array.Empty<string>();
 
             if (playedCards.Length < 2)
+            {
                 return false;
+            }
 
             seat = player.Seat;
 
@@ -1161,7 +1218,6 @@ public class GameManager
             }
             else
             {
-                // 🔥 CORREÇÃO: Esconde o Vira e recomeça o relógio para o próximo!
                 table.CenterCard = "Hidden";
                 table.TurnEndTime = DateTime.UtcNow.AddSeconds(20);
             }

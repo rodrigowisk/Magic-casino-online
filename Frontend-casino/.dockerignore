@@ -1,0 +1,10 @@
+node_modules/
+android/
+ios/
+dist/
+dist-ssr/
+.git/
+*.apk
+*.aab
+.vscode/
+.DS_Store

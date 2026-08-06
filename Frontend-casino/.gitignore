@@ -1,0 +1,25 @@
+# --- .NET ---
+bin/
+obj/
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+
+# --- Vue / Frontend ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+
+# --- Docker & DB ---
+.env
+# Se você quiser subir um exemplo das variáveis sem as senhas, 
+# ignore o .env mas mantenha um .env.example
+
+# --- Logs ---
+*.log
+logs/

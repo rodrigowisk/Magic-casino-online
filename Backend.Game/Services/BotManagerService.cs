@@ -25,7 +25,7 @@ public class BotManagerService : BackgroundService
 {
     // 👇 CHAVE GERAL PARA LIGAR/DESLIGAR OS BOTS 👇
     // true = ligado | false = desligado
-    private readonly bool _botsEnabled = true;
+    private readonly bool _botsEnabled = false;
 
     private readonly IServiceProvider _serviceProvider;
     private readonly ConcurrentDictionary<string, BotSession> _activeBots = new();

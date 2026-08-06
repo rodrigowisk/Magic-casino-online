@@ -1,0 +1,1324 @@
+<template>
+<div class="main-wrapper" ref="wrapperRef">
+<div class="game-container" :style="{ transform: `translate(-50%, -50%) scale(${gameScale})` }">
+<GameLoading :visible="isAppLoading" />
+<div class="table-content-fader" :class="{ 'fade-in-content': !isAppLoading }">
+<div ref="pixiContainer" class="pixi-canvas"></div>
+<div class="table-neon-aura"></div>
+<div class="leave-warning" v-if="isWaitingToLeave">
+<span>Você levantará ao fim da mão</span>
+<button @click="cancelLeaveNextHand">CANCELAR</button>
+</div>
+<div class="waitlist-widget" v-if="!isHeroSeated && (gameState.waitlist.length > 0 || isTableFull)">
+<div class="waitlist-header" @click="showWaitlistList = !showWaitlistList">
+<div class="waitlist-info">
+<span v-if="amIInWaitlist" class="waitlist-title">SUA POSIÇÃO: <span class="text-green">{{ waitlistPosition }}º</span></span>
+<span v-else-if="gameState.waitlist.length > 0" class="waitlist-title">PRÓXIMO: <span class="text-blue">{{ gameState.waitlist[0].name }}</span></span>
+<span v-else class="waitlist-title">LISTA DE ESPERA</span>
+<span class="waitlist-subtitle">JOGADORES: ({{ gameState.waitlist.length }})</span>
+</div>
+<svg class="chevron" :class="{'open': showWaitlistList}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<polyline points="6 9 12 15 18 9"></polyline>
+</svg>
+</div>
+<transition name="fade-slide">
+<div class="waitlist-list" v-if="showWaitlistList && gameState.waitlist.length > 0">
+<div v-for="(user, idx) in gameState.waitlist" :key="user.userId" class="waitlist-item">
+<span class="wl-pos">{{ idx + 1 }}º</span>
+<span class="wl-name" :class="{'text-green': user.userId === currentUserId}">{{ user.name }}</span>
+</div>
+</div>
+</transition>
+<button v-if="!amIInWaitlist" class="btn-wl-action join" @click="gameHub.joinWaitlist()">+ ENTRAR NA FILA</button>
+<button v-else class="btn-wl-action leave" @click="gameHub.leaveWaitlist()">- SAIR DA FILA</button>
+</div>
+<button class="hud-btn hud-top-left" @click="clicouMenu" title="Menu">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<line x1="3" y1="12" x2="21" y2="12"></line>
+<line x1="3" y1="6" x2="21" y2="6"></line>
+<line x1="3" y1="18" x2="21" y2="18"></line>
+</svg>
+</button>
+<button class="hud-btn hud-top-right" @click="clicouEstatisticas" title="Estatísticas">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M18 20V10"></path>
+<path d="M12 20V4"></path>
+<path d="M6 20v-6"></path>
+</svg>
+</button>
+<button v-if="isHeroSeated" class="hud-btn hud-bottom-left" @click="clicouVerMaos" title="Histórico de Mãos">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<rect x="2" y="6" width="14" height="16" rx="2" ry="2"></rect>
+<path d="M22 18V4a2 2 0 0 0-2-2H8"></path>
+</svg>
+</button>
+<div class="ui-layer">
+<!-- Lógica estável dos botões com !isDealing e !isAnimating -->
+<div class="controls-wrapper" v-if="gameState.phase === 'betting' && !isDealing && !isAnimating && gameState.players[gameState.currentTurn]?.isHero && gameState.players[gameState.currentTurn]?.status === 'playing'">
+<BettingControls 
+:minBet="Math.min(gameState.minBet, gameState.pot, gameState.players[gameState.currentTurn]?.chips || gameState.minBet)"
+:maxBet="Math.min(gameState.pot, gameState.players[gameState.currentTurn]?.chips || gameState.pot)"
+@pular="invokeSkipBet"
+@apostar="invokeConfirmBet"
+/>
+</div>
+</div>
+<BuyInModal 
+v-if="showBuyInModal"
+:minBet="gameState.minBet"
+:minBuyIn="gameState.tableMinBuyIn" 
+:rake="gameState.rake"
+:expiresAt="gameState.expiresAt"
+:maxBalance="modalMaxBalance"
+:isWaitlist="isMyTurnToSit" 
+:errorMessage="buyInErrorMessage"
+:isSubmitting="isSittingDown"
+@cancel="cancelBuyIn"
+@confirm="invokeBuyIn"
+/>
+<MeinhoMenu 
+v-if="showMenuModal"
+:soundEnabled="soundModeEnabled"
+:peekEnabled="peekModeEnabled"
+:isSeated="isHeroSeated"
+@close="showMenuModal = false"
+@leave="handleMenuLeave"
+@lobby="handleLobby"
+@rules="handleMenuRules"
+@settings="handleMenuSettings"
+@toggleSound="handleToggleSound"
+@togglePeek="handleTogglePeek"
+@rebuy="handleMenuRebuy"
+/>
+<transition name="fade-peeker">
+<MeinhoPeeker 
+v-if="showPeekerModal"
+class="peeker-safe-hide"
+:class="{ 'peeker-hidden': showRebuyModal || appAlertMessage !== '' }"
+ref="peekerRef"
+:cards="heroCards"
+@close="fecharPeekerERevelar"
+/>
+</transition>
+<HandHistoryModal 
+  :isOpen="showHandHistoryModal" 
+  :history="sessionHandHistory" 
+  :currentUserId="currentUserId"
+  :players="gameState.players" 
+  @update:isOpen="showHandHistoryModal = $event"
+/>
+<TableStatsModal 
+v-if="showStatsModal"
+:isOpen="showStatsModal"
+:players="activePlayersForStats"  
+@update:isOpen="showStatsModal = $event"
+/>
+<RebuyModal 
+v-if="showRebuyModal"
+:minBuyIn="gameState.tableMinBuyIn"
+:maxBalance="userTotalBalance"
+:currentChips="gameState.players.find(p => p.isHero)?.chips || 0"
+:errorMessage="rebuyErrorMessage"
+@cancel="cancelRebuyAction"
+@confirm="confirmRebuyAction"
+/>
+<transition name="fade-alert">
+<div class="custom-alert-overlay" v-if="appAlertMessage" @click.self="appAlertMessage = ''">
+<div class="custom-alert-box">
+<div class="alert-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="#3ce48a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+<polyline points="22 4 12 14.01 9 11.01"></polyline>
+</svg>
+</div>
+<h3>Aviso</h3>
+<p v-html="appAlertMessage"></p>
+<button class="btn-confirm-full" @click="appAlertMessage = ''">OK</button>
+</div>
+</div>
+</transition>
+</div>
+</div>
+<div class="table-id-footer">
+ID da Mesa: {{ tableId }}
+</div>
+</div>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router'; 
+import GameLoading from '../components/Meinho/GameLoading.vue';
+import { MeinhoPixiEngine } from '../Game/Meinho/MeinhoPixiEngine';
+import { useGameHub } from '../composables/useGameHub';
+import BettingControls from './BettingControls.vue'; 
+import BuyInModal from '../components/Meinho/BuyInModal.vue'; 
+import RebuyModal from '../components/Meinho/RebuyModal.vue';
+import MeinhoMenu from '../components/Meinho/MeinhoMenu.vue';
+import MeinhoPeeker from '../components/Meinho/MeinhoPeeker.vue'; 
+import HandHistoryModal from '../components/Meinho/HandHistoryModal.vue'; 
+import TableStatsModal from '../components/Meinho/TableStatsModal.vue'; 
+import singleChipImg from '../assets/imagens/chip1.webp';
+import potChipsImg from '../assets/imagens/chips.webp'; 
+import deckImg from '../assets/imagens/deck.webp';
+import tableImgAsset from '../assets/imagens/GameTable1.png'; // IMAGEM RESTAURADA DO PRIMEIRO ENVIO
+import { hapticsService } from '../services/haptics';
+
+const route = useRoute();
+const router = useRouter(); 
+const tableId = route.params.id as string;
+const GAME_WIDTH = 430;
+const GAME_HEIGHT = 900;
+const gameScale = ref(1);
+const wrapperRef = ref<HTMLElement | null>(null);
+const isAppLoading = ref(true);
+const peekerRef = ref<any>(null);
+const isDiscarding3D = ref(false);
+const isWaitingToLeave = ref(false);
+
+const currentUserId = String(localStorage.getItem('magic_userid') || '').trim();
+const safeCurrentUserId = currentUserId.toLowerCase();
+
+const currentUserName = String(localStorage.getItem('magic_username') || '').trim();
+const currentAvatar = String(localStorage.getItem('magic_avatar') || 'default.webp').trim();
+const sessionStartTime = ref<string | null>(null);
+const userTotalBalance = ref(0); 
+const myLastChips = ref(0);
+const showBuyInModal = ref(false);
+const buyInErrorMessage = ref('');
+const isSittingDown = ref(false);
+const pendingSitSeat = ref(-1);
+const expectedHeroLogicalSeat = ref(-1); 
+const showRebuyModal = ref(false);
+const rebuyErrorMessage = ref('');
+const isManualRebuy = ref(false);
+const showMenuModal = ref(false);
+const showPeekerModal = ref(false);
+const showStatsModal = ref(false);
+const showHandHistoryModal = ref(false);
+const sessionHandHistory = ref<any[]>([]); 
+const showWaitlistList = ref(false);
+const soundModeEnabled = ref(localStorage.getItem('magic_sound_enabled') !== '0'); 
+const peekModeEnabled = ref(localStorage.getItem('magic_peek_enabled') !== '0'); 
+const appAlertMessage = ref('');
+const isMyTurnToSit = ref(false);
+const hasPeekedCurrentHand = ref(false); 
+const hasManuallyRevealedCards = ref(false); 
+const lastProcessedHandCards = ref(''); 
+let peekTimeoutId: ReturnType<typeof setTimeout> | null = null;
+const isDealing = ref(false); 
+const isAnimating = ref(false); 
+
+let pendingState: any = null;
+let forceNextSyncAsSnap = false; 
+let lastServerStateAt = Date.now();
+let syncTimeoutId: any = null;
+
+const queuedAnimations: Array<() => Promise<void>> = [];
+const processAnimationQueue = async () => {
+    if (isAnimating.value) return; 
+    while (queuedAnimations.length > 0) {
+        if (document.hidden) break;
+        isAnimating.value = true;
+        const anim = queuedAnimations.shift();
+        if (anim) {
+            try { await anim(); } catch (e) { console.error("Erro na animacao da fila:", e); }
+        }
+    }
+    isAnimating.value = false;
+    flushPendingState();
+};
+
+const enqueueAnim = (task: () => Promise<void>) => {
+    queuedAnimations.push(task);
+    processAnimationQueue();
+};
+
+const pixiContainer = ref<HTMLElement | null>(null);
+const avatarImages: Record<string, string> = import.meta.glob('../assets/imagens/avatars/**/*.webp', { eager: true, import: 'default' });
+const getAvatarUrl = (filename: string | undefined) => {
+    const safeFilename = filename || 'default.webp';
+    const path = `../assets/imagens/avatars/${safeFilename}`;
+    return avatarImages[path] || avatarImages['../assets/imagens/avatars/default.webp'];
+};
+
+interface WaitlistUser { userId: string; name: string; }
+interface CardData { rank: string; suit: string; value: number; }
+interface Player {
+    userId?: string; connectionId?: string; seat: number; name: string; chips: number; cards: CardData[];
+    totalBuyIn: number; totalCashOut: number; lastChips: number; isHero: boolean; status: 'waiting' | 'playing' | 'out' | 'done';
+    isSeated: boolean; avatar?: string; uiCards?: any[]; x?: number; y?: number; serverCards?: string[]; 
+    pendingRebuy: number; 
+}
+interface GameState {
+    phase: 'waiting' | 'dealing' | 'betting' | 'resolving'; pot: number; minBet: number; currentTurn: number; players: Player[];
+    centerCardStr?: string; turnTimeLeft: number; maxPlayers: number; rake: number; tableMinBuyIn: number; tableName: string; 
+    expiresAt: string; waitlist: WaitlistUser[]; reservedFor: string | null; 
+    lastStateTimestamp?: number; 
+}
+
+const gameState = reactive<GameState>({
+    phase: 'waiting', pot: 0, minBet: 10, currentTurn: -1, turnTimeLeft: 0, maxPlayers: 0, rake: 0, tableMinBuyIn: 100, tableName: '', 
+    expiresAt: '', players: [], waitlist: [], reservedFor: null
+});
+
+watch(() => gameState.currentTurn, (newTurn) => {
+    if (newTurn !== -1 && gameState.players[newTurn]?.isHero) {
+        isDealing.value = false;
+        isAnimating.value = false;
+        isDiscarding3D.value = false;
+    }
+}, { immediate: true });
+
+const modalMaxBalance = computed(() => {
+    if (myLastChips.value > 0 && myLastChips.value < gameState.tableMinBuyIn) return gameState.tableMinBuyIn; 
+    return userTotalBalance.value;
+});
+const isHeroSeated = computed(() => { return gameState.players.some(p => p.isHero && p.isSeated); });
+const isTableFull = computed(() => { return gameState.players.filter(p => p.isSeated).length >= (gameState.maxPlayers || 6); });
+const activePlayersForStats = computed(() => gameState.players.filter(p => p.isSeated));
+const amIInWaitlist = computed(() => { return gameState.waitlist.some(w => w.userId === currentUserId); });
+const waitlistPosition = computed(() => { return gameState.waitlist.findIndex(w => w.userId === currentUserId) + 1; });
+
+const myLogicalSeatOffset = ref(0);
+const heroCards = computed(() => {
+    const hero = gameState.players.find(p => p.isHero && p.isSeated);
+    return hero && hero.serverCards ? hero.serverCards : [];
+});
+
+watch(() => heroCards.value, (newCards) => {
+    const currentCardsStr = newCards ? newCards.join(',') : '';
+    if (currentCardsStr !== lastProcessedHandCards.value) {
+        lastProcessedHandCards.value = currentCardsStr;
+        if (newCards && newCards.length === 2) {
+            hasPeekedCurrentHand.value = false;
+            hasManuallyRevealedCards.value = !peekModeEnabled.value; 
+            if (!isDiscarding3D.value) showPeekerModal.value = false; 
+            if (peekTimeoutId) clearTimeout(peekTimeoutId);
+            verificarAberturaFilar();
+        } else if (!newCards || newCards.length === 0) {
+            hasPeekedCurrentHand.value = false;
+            hasManuallyRevealedCards.value = false;
+            if (!isDiscarding3D.value) showPeekerModal.value = false; 
+            if (peekTimeoutId) clearTimeout(peekTimeoutId);
+        }
+    }
+}, { deep: true });
+
+const verificarAberturaFilar = () => {
+    const hero = gameState.players.find(p => p.isHero);
+    const cards = heroCards.value;
+    
+    if (cards && cards.length === 2 && hero && hero.status === 'playing' && peekModeEnabled.value && !hasPeekedCurrentHand.value && !hasManuallyRevealedCards.value) {
+        hasPeekedCurrentHand.value = true;
+        if (peekTimeoutId) clearTimeout(peekTimeoutId);
+        
+        const tryOpenPeeker = () => {
+            if (!hasManuallyRevealedCards.value && hero && hero.status === 'playing') {
+                showPeekerModal.value = true;
+            }
+        };
+        
+        const checkEngineIdle = () => {
+            if (isDealing.value || isAnimating.value || queuedAnimations.length > 0 || isDiscarding3D.value) {
+                peekTimeoutId = setTimeout(checkEngineIdle, 250);
+            } else {
+                peekTimeoutId = setTimeout(tryOpenPeeker, 300);
+            }
+        };
+
+        peekTimeoutId = setTimeout(checkEngineIdle, 400);
+    }
+};
+
+watch(() => peekModeEnabled.value, (ligado) => {
+    engine.setPeekMode(ligado);
+    localStorage.setItem('magic_peek_enabled', ligado ? '1' : '0');
+});
+
+watch(() => gameState.phase, (newPhase, oldPhase) => {
+    if (engine && typeof engine.updateDeckVisibility === 'function') engine.updateDeckVisibility();
+    if (newPhase === 'waiting' && oldPhase !== 'waiting') {
+        if (isWaitingToLeave.value) {
+            invokeStandUp();
+            isWaitingToLeave.value = false;
+        }
+    }
+    
+    if (newPhase === 'dealing' && oldPhase !== 'dealing') {
+        hasPeekedCurrentHand.value = false;
+        hasManuallyRevealedCards.value = !peekModeEnabled.value;
+        if (engine) {
+            engine.heroHasRevealedCurrentHand = !peekModeEnabled.value;
+        }
+    }
+});
+
+watch(() => {
+    const hero = gameState.players.find(p => p.isHero);
+    return hero ? hero.status : null;
+}, (newStatus) => {
+    if (newStatus === 'out' || newStatus === 'done') {
+        if (!isDiscarding3D.value) showPeekerModal.value = false; 
+        hasManuallyRevealedCards.value = true; 
+        hapticsService.mediumImpact(); 
+    }
+});
+
+function fecharPeekerERevelar() {
+    hasManuallyRevealedCards.value = true; 
+    if (!isDiscarding3D.value) showPeekerModal.value = false;
+    engine.revealHeroCards(); 
+}
+
+function calculateScale() {
+    if (!wrapperRef.value) return;
+    const winW = wrapperRef.value.clientWidth;
+    const winH = wrapperRef.value.clientHeight;
+    const safeW = winW - 12;
+    const safeH = winH - 12;
+    const scaleW = safeW / GAME_WIDTH;
+    const scaleH = safeH / GAME_HEIGHT;
+    gameScale.value = Math.min(scaleW, scaleH); 
+}
+
+async function fetchUserBalance() {
+    if (!currentUserId) return;
+    try {
+        const IDENTITY_API_URL = import.meta.env.VITE_IDENTITY_API_URL || 'http://localhost:5001';
+        const response = await fetch(`${IDENTITY_API_URL}/api/wallet/${currentUserId}/balance`);
+        if (response.ok) {
+            const data = await response.json();
+            userTotalBalance.value = data.balance;
+        }
+    } catch(e) {}
+}
+
+const gameHub = useGameHub(tableId, currentUserId, currentUserName, currentAvatar, {
+    onReceiveTableState: (serverState: any) => syncTable(serverState),
+    onPlayerSkipped: (logicalSeat: number) => {
+        enqueueAnim(async () => {
+            let safetyTimer: any;
+            const safetyPromise = new Promise(resolve => { safetyTimer = setTimeout(resolve, 8000); });
+            const animTask = async () => {
+                const visualSeat = (logicalSeat - myLogicalSeatOffset.value + (gameState.maxPlayers || 6)) % (gameState.maxPlayers || 6);
+                await engine.playSkipAnimation(visualSeat);
+            };
+            try { await Promise.race([animTask(), safetyPromise]); } catch(err) {} finally { clearTimeout(safetyTimer); }
+        });
+    },
+    onPlayerBetted: (logicalSeat: number, betAmount: number, isWin: boolean, potBroken: boolean, playedCards: string[], centerCardRevealed: string) => {
+        const eventReceivedTime = Date.now();
+        enqueueAnim(async () => {
+            let timeOffsetMs = Date.now() - eventReceivedTime;
+            let safetyTimer: any;
+            const safetyPromise = new Promise(resolve => { safetyTimer = setTimeout(resolve, 14000); });
+            const animTask = async () => {
+                const visualSeat = (logicalSeat - myLogicalSeatOffset.value + (gameState.maxPlayers || 6)) % (gameState.maxPlayers || 6);
+                await engine.playBetAnimation(visualSeat, betAmount, isWin, playedCards, centerCardRevealed, timeOffsetMs);
+                if (potBroken) await engine.rechargePotAnim();
+            };
+            try { await Promise.race([animTask(), safetyPromise]); } catch(err) {} finally { clearTimeout(safetyTimer); }
+        });
+    },
+    onWalletBalanceUpdated: (newBalance: number) => { userTotalBalance.value = newBalance; },
+    onPlayerSatDown: (logicalSeat: number) => {
+        let offsetToUse = myLogicalSeatOffset.value;
+        if (logicalSeat === expectedHeroLogicalSeat.value) {
+            offsetToUse = logicalSeat;
+            myLogicalSeatOffset.value = logicalSeat; 
+            expectedHeroLogicalSeat.value = -1; 
+        }
+        const visualSeat = (logicalSeat - offsetToUse + (gameState.maxPlayers || 6)) % (gameState.maxPlayers || 6);
+        if (typeof (engine as any).playSitEffect === 'function') (engine as any).playSitEffect(visualSeat);
+    },
+    onPlayerStoodUp: (logicalSeat: number) => {
+        const visualSeat = (logicalSeat - myLogicalSeatOffset.value + (gameState.maxPlayers || 6)) % (gameState.maxPlayers || 6);
+        if (typeof (engine as any).playStandEffect === 'function') (engine as any).playStandEffect(visualSeat);
+    },
+    onReceiveError: (msg: string) => {
+        if (showRebuyModal.value) {
+            rebuyErrorMessage.value = msg;
+            return;
+        }
+        if (showBuyInModal.value) {
+            isSittingDown.value = false;
+            buyInErrorMessage.value = msg;
+            return;
+        }
+        appAlertMessage.value = `<span style="color: #ff4757; font-weight: bold;">Aviso do Servidor:</span><br><br>${msg}`;
+        if (msg && (msg.toLowerCase().includes('desconectado') || msg.toLowerCase().includes('reinici') || msg.toLowerCase().includes('reconnect'))) {
+            setTimeout(() => {
+                window.location.reload();
+            }, 3000);
+        }
+    },
+    onWaitlistYourTurn: () => {
+        isMyTurnToSit.value = true;
+        appAlertMessage.value = ''; 
+        pendingSitSeat.value = -1; 
+        buyInErrorMessage.value = '';
+        showBuyInModal.value = true;
+    },
+    onWaitlistExpired: () => {
+        isMyTurnToSit.value = false;
+        if (showBuyInModal.value) {
+            showBuyInModal.value = false;
+            pendingSitSeat.value = -1;
+        }
+    },
+    onReconnected: () => {
+        queuedAnimations.length = 0;
+        isDealing.value = false;
+        isAnimating.value = false;
+        isDiscarding3D.value = false;
+        pendingState = null;
+        forceNextSyncAsSnap = true;
+    }
+});
+
+async function triggerSitFlow(logicalSeat: number) {
+    if (gameState.reservedFor === currentUserId) isMyTurnToSit.value = true; 
+    await fetchUserBalance();
+    const minBuyIn = gameState.tableMinBuyIn;
+    if (myLastChips.value >= minBuyIn) {
+        expectedHeroLogicalSeat.value = logicalSeat;
+        gameHub.sitDown(logicalSeat, myLastChips.value).then(() => {
+            fetchUserBalance();
+            if (!sessionStartTime.value) sessionStartTime.value = new Date().toISOString();
+            isMyTurnToSit.value = false; 
+        }).catch(e => {
+            expectedHeroLogicalSeat.value = -1;
+            appAlertMessage.value = `<span style="color: #ff4757; font-weight: bold;">Erro do Servidor:</span><br><br>A conexão falhou ao tentar sentar.`;
+        });
+        return;
+    }
+    pendingSitSeat.value = logicalSeat;
+    buyInErrorMessage.value = '';
+    showBuyInModal.value = true;
+}
+
+const engine = new MeinhoPixiEngine(gameState, {
+    setDealing: (v) => isDealing.value = v,
+    setAnimating: (v) => isAnimating.value = v,
+    flushPendingState: () => flushPendingState(),
+    sitDown: async (visualSeatIndex: number) => {
+        if (gameState.players.some(p => p.isHero && p.isSeated)) return;
+        if (gameState.reservedFor && gameState.reservedFor !== currentUserId) {
+            appAlertMessage.value = `<span style="color: #f1c40f; font-weight: bold;">Mesa Trancada!</span><br><br>Esta cadeira está reservada para o próximo jogador da fila de espera.`;
+            return;
+        }
+        const logicalSeat = (visualSeatIndex + myLogicalSeatOffset.value) % (gameState.maxPlayers || 6);
+        triggerSitFlow(logicalSeat);
+    }
+});
+
+function invokeBuyIn(amount: number) {
+    let logicalSeatToSit = pendingSitSeat.value;
+    if (isMyTurnToSit.value) {
+        const occupiedLogicalSeats = gameState.players
+            .filter(p => p.isSeated)
+            .map(p => {
+                const visualIndex = gameState.players.indexOf(p);
+                return (visualIndex + myLogicalSeatOffset.value) % (gameState.maxPlayers || 6);
+            });
+        for(let i = 0; i < (gameState.maxPlayers || 6); i++) {
+            if (!occupiedLogicalSeats.includes(i)) {
+                logicalSeatToSit = i;
+                break;
+            }
+        }
+    }
+    if (logicalSeatToSit !== -1 && amount > 0) {
+        buyInErrorMessage.value = '';
+        isSittingDown.value = true;
+        pendingSitSeat.value = -1;
+        expectedHeroLogicalSeat.value = logicalSeatToSit; 
+        gameHub.sitDown(logicalSeatToSit, amount).then(() => {
+            isSittingDown.value = false;
+            showBuyInModal.value = false;
+            isMyTurnToSit.value = false; 
+            fetchUserBalance();
+            sessionStartTime.value = new Date().toISOString();
+        }).catch(e => {
+            isSittingDown.value = false;
+            expectedHeroLogicalSeat.value = -1; 
+            if (showBuyInModal.value) {
+                buyInErrorMessage.value = "O servidor abortou a ação de sentar. Tente novamente.";
+            } else {
+                appAlertMessage.value = `<span style="color: #ff4757; font-weight: bold;">Erro do Servidor:</span><br><br>O servidor abortou a ação de sentar. Verifique os logs da sua API.`;
+            }
+        });
+    } else {
+        cancelBuyIn();
+    }
+}
+
+function cancelBuyIn() {
+    buyInErrorMessage.value = '';
+    isSittingDown.value = false;
+    showBuyInModal.value = false;
+    pendingSitSeat.value = -1;
+    if (isMyTurnToSit.value) {
+        isMyTurnToSit.value = false;
+        gameHub.leaveWaitlist();
+    }
+}
+
+function handleMenuRebuy() {
+    showMenuModal.value = false;
+    isManualRebuy.value = true;
+    rebuyErrorMessage.value = '';
+    showRebuyModal.value = true;
+}
+
+function cancelRebuyAction() {
+    showRebuyModal.value = false;
+    rebuyErrorMessage.value = '';
+    if (!isManualRebuy.value) invokeStandUp(); 
+    isManualRebuy.value = false;
+}
+
+function confirmRebuyAction(amount: number) {
+    invokeRebuy(amount);
+    isManualRebuy.value = false;
+}
+
+watch(() => showPeekerModal.value, (isOpen) => {
+    if (engine) engine.setHeroCardsVisibility(!isOpen);
+});
+
+watch(() => [gameState.tableName, gameState.tableMinBuyIn, gameState.minBet], ([newName, newBuyIn, newAnte]) => {
+    if (engine) {
+        if (typeof (engine as any).updateTableTexts === 'function') {
+            (engine as any).updateTableTexts(newName, newBuyIn, newAnte);
+        }
+        if (typeof (engine as any).updateTableInfo === 'function') {
+            (engine as any).updateTableInfo(newName, newBuyIn, newAnte);
+        }
+    }
+});
+
+watch(() => gameState.pot, (newPot) => { engine.updatePotText(newPot); });
+
+function applyState(serverState: any, isSnap = false) {
+    try {
+        const oldPhase = gameState.phase;
+        const serverMaxPlayers = Number(serverState.maxPlayers || serverState.MaxPlayers || 6);
+        
+        const rawTurnTimeLeft = serverState.turnTimeLeft ?? serverState.TurnTimeLeft ?? 0;
+        let adjustedTurnTime = Number(rawTurnTimeLeft);
+        
+        if (serverState._receivedAt) {
+            const delayedSec = (Date.now() - serverState._receivedAt) / 1000;
+            adjustedTurnTime = Math.max(0, adjustedTurnTime - delayedSec);
+        }
+        
+        const normState = {
+            phase: String(serverState.phase || serverState.Phase || 'waiting').toLowerCase(),
+            pot: Number(serverState.pot !== undefined ? serverState.pot : (serverState.Pot || 0)),
+            minBet: Number(serverState.minBet !== undefined ? serverState.minBet : (serverState.MinBet || 10)),
+            currentTurnSeat: Number(serverState.currentTurnSeat !== undefined ? serverState.currentTurnSeat : (serverState.CurrentTurnSeat ?? -1)),
+            centerCard: String(serverState.centerCard || serverState.CenterCard || ''),
+            turnTimeLeft: adjustedTurnTime,
+            players: (serverState.players || serverState.Players || []).map((p: any) => {
+                let tBuyIn = 0; if (p.totalBuyIn !== undefined) tBuyIn = Number(p.totalBuyIn); else if (p.TotalBuyIn !== undefined) tBuyIn = Number(p.TotalBuyIn);
+                let tCashOut = 0; if (p.totalCashOut !== undefined) tCashOut = Number(p.totalCashOut); else if (p.TotalCashOut !== undefined) tCashOut = Number(p.TotalCashOut);
+                let tLastChips = 0; if (p.lastChips !== undefined) tLastChips = Number(p.lastChips); else if (p.LastChips !== undefined) tLastChips = Number(p.LastChips);
+                let tPendingRebuy = 0; if (p.pendingRebuy !== undefined) tPendingRebuy = Number(p.pendingRebuy); else if (p.PendingRebuy !== undefined) tPendingRebuy = Number(p.PendingRebuy); 
+                return {
+                    userId: String(p.userId || p.UserId || ''),
+                    connectionId: String(p.connectionId || p.ConnectionId || ''),
+                    name: String(p.name || p.Name || 'Livre'),
+                    isSeated: !!(p.isSeated || p.IsSeated),
+                    seat: p.seat !== undefined ? p.seat : (p.Seat !== undefined ? p.Seat : -1),
+                    chips: p.chips !== undefined ? p.chips : (p.Chips !== undefined ? p.Chips : 0),
+                    pendingRebuy: tPendingRebuy, 
+                    totalBuyIn: tBuyIn, totalCashOut: tCashOut, lastChips: tLastChips, 
+                    cards: p.cards || p.Cards || [], 
+                    status: String(p.status || p.Status || 'waiting').toLowerCase(), avatar: String(p.avatar || p.Avatar || 'default.webp') 
+                };
+            })
+        };
+
+        let forceSnap = isSnap; 
+        let isStaleRound = false;
+
+        if (normState.phase === 'resolving') {
+            if (normState.turnTimeLeft > 0 && normState.turnTimeLeft < 5.5) {
+                if (oldPhase !== 'betting' && oldPhase !== 'resolving') {
+                    forceSnap = true;
+                }
+            }
+        } else if (normState.phase === 'dealing') {
+            if (normState.turnTimeLeft > 0 && normState.turnTimeLeft < 1.5) {
+                if (oldPhase !== 'waiting' && oldPhase !== 'resolving') {
+                    forceSnap = true;
+                }
+            }
+        }
+
+        const oldSeatedCount = gameState.players.filter((p: any) => p.isSeated).length;
+        const newSeatedCount = normState.players.filter((p: any) => p.isSeated).length;
+
+        if (oldPhase === 'resolving' && normState.phase === 'betting') isStaleRound = true;
+        if (oldPhase === 'waiting' && normState.phase === 'betting') isStaleRound = true;
+        if (newSeatedCount < oldSeatedCount) forceSnap = true;
+        
+        if (oldPhase !== 'resolving' && oldPhase !== 'waiting') {
+            normState.players.forEach((normP: any) => {
+                if (!normP.isSeated || !normP.isHero) return; 
+                const oldP = gameState.players.find((p: any) => p.isSeated && p.userId === normP.userId);
+                if (oldP && normP.cards && normP.cards.length > 0) {
+                    const oldStr = (oldP.serverCards || []).join(',');
+                    const newStr = normP.cards.join(',');
+                    if (oldStr !== '' && oldStr !== newStr) {
+                        isStaleRound = true;
+                    }
+                }
+            });
+        }
+        
+        if (isStaleRound) forceSnap = true;
+
+        gameState.expiresAt = serverState.expiresAt || serverState.ExpiresAt || '';
+        gameState.tableName = serverState.tableName || serverState.TableName || serverState.name || serverState.Name || '';
+        
+        let safeMinBuyIn = Number(serverState.minBuyIn !== undefined ? serverState.minBuyIn : (serverState.MinBuyIn || 100));
+        if (isNaN(safeMinBuyIn) || safeMinBuyIn <= 0) {
+            safeMinBuyIn = normState.minBet * 10; 
+            if (safeMinBuyIn <= 0) safeMinBuyIn = 100; 
+        }
+        gameState.tableMinBuyIn = safeMinBuyIn;
+        gameState.rake = Number(serverState.rake !== undefined ? serverState.rake : (serverState.Rake || 0));
+
+        if (gameState.maxPlayers !== serverMaxPlayers) {
+            gameState.maxPlayers = serverMaxPlayers;
+            gameState.players = []; 
+            for(let i=0; i<serverMaxPlayers; i++) {
+                gameState.players.push({ seat: i, name: "Livre", chips: 0, pendingRebuy: 0, cards: [], totalBuyIn: 0, totalCashOut: 0, lastChips: 0, isHero: false, status: 'waiting', isSeated: false });
+            }
+            if (engine) engine.buildSeats(serverMaxPlayers);
+        }
+
+        gameState.waitlist = (serverState.waitlist || serverState.Waitlist || []).map((w: any) => ({
+            userId: w.userId || w.UserId,
+            name: w.name || w.Name
+        }));
+        
+        gameState.reservedFor = serverState.reservedForUserId || serverState.ReservedForUserId || null;
+
+        let heroPlayer = null;
+        if (safeCurrentUserId !== '') {
+            heroPlayer = normState.players.find((p: any) => p.isSeated && p.userId && String(p.userId).toLowerCase() === safeCurrentUserId);
+        }
+
+        if (heroPlayer) {
+            myLogicalSeatOffset.value = heroPlayer.seat;
+        } else {
+            isWaitingToLeave.value = false;
+        }
+
+        if (engine) engine.updateHeroSeatStatus(!!heroPlayer);
+
+        const futureOccupied = new Set();
+        normState.players.forEach((p: any) => {
+            if (p.isSeated) {
+                const visualSeat = (p.seat - myLogicalSeatOffset.value + (gameState.maxPlayers || 6)) % (gameState.maxPlayers || 6);
+                futureOccupied.add(visualSeat);
+            }
+        });
+
+        for (let i = 0; i < (gameState.maxPlayers || 6); i++) {
+            if (!futureOccupied.has(i)) {
+                const player = gameState.players[i];
+                if (player) {
+                    player.isSeated = false; player.name = `Livre`; player.isHero = false; player.chips = 0; player.pendingRebuy = 0; player.status = 'waiting';
+                    if (engine && typeof (engine as any).clearPlayerCards === 'function') (engine as any).clearPlayerCards(i);
+                }
+                if (engine) engine.updatePlayerSeat(i, false, "Livre", 0, 'waiting', getAvatarUrl('default.webp'));
+            }
+        }
+
+        normState.players.forEach((p: any) => {
+            if (p.isSeated && p.seat >= 0 && p.seat < (gameState.maxPlayers || 6)) {
+                const visualSeat = (p.seat - myLogicalSeatOffset.value + (gameState.maxPlayers || 6)) % (gameState.maxPlayers || 6);
+                const player = gameState.players[visualSeat];
+                if (player) {
+                    player.isSeated = true; 
+                    player.name = p.name; 
+                    player.chips = p.chips; 
+                    player.pendingRebuy = p.pendingRebuy; 
+                    player.status = p.status;
+                    player.avatar = p.avatar;
+                    player.isHero = (safeCurrentUserId !== '' && p.userId && String(p.userId).toLowerCase() === safeCurrentUserId);
+                    
+                    if (p.cards && p.cards.length > 0) {
+                        if (player.isHero && p.cards[0] === "Hidden" && player.serverCards && player.serverCards.length > 0 && player.serverCards[0] !== "Hidden") {
+                        } else {
+                            player.serverCards = p.cards;
+                        }
+                    }
+
+                    player.totalBuyIn = p.totalBuyIn;
+                    player.totalCashOut = p.totalCashOut;
+                    player.lastChips = p.lastChips;
+
+                    if (!p.cards || p.cards.length === 0) {
+                        player.status = 'out';
+                    }
+                }
+                
+                const resolvedAvatarUrl = getAvatarUrl(p.avatar);
+                if (engine) {
+                    engine.updatePlayerSeat(visualSeat, true, p.name, p.chips, player.status, resolvedAvatarUrl);
+                }
+            }
+        });
+
+        let deveTocarRedemoinho = false;
+        if (oldPhase === 'resolving' && (normState.phase === 'dealing' || normState.phase === 'waiting')) {
+            deveTocarRedemoinho = true;
+            forceSnap = false; 
+        }
+
+        gameState.pot = normState.pot;
+        gameState.minBet = normState.minBet;
+        gameState.centerCardStr = normState.centerCard;
+        gameState.turnTimeLeft = normState.turnTimeLeft;
+        gameState.phase = normState.phase as any; 
+        gameState.lastStateTimestamp = Date.now(); 
+
+        if (engine) {
+            if (typeof (engine as any).updateTableTexts === 'function') {
+                (engine as any).updateTableTexts(gameState.tableName, gameState.tableMinBuyIn, gameState.minBet);
+            }
+            if (typeof (engine as any).updateTableInfo === 'function') {
+                (engine as any).updateTableInfo(gameState.tableName, gameState.tableMinBuyIn, gameState.minBet);
+            }
+        }
+
+        if (gameState.pot === 0 && engine) engine.clearPotChips();
+
+        if (heroPlayer && heroPlayer.isSeated && (heroPlayer.chips + heroPlayer.pendingRebuy) <= 0 && heroPlayer.status !== 'playing') {
+            if (normState.phase !== 'resolving') {
+                fetchUserBalance().then(() => { if(!isManualRebuy.value) { rebuyErrorMessage.value = ''; showRebuyModal.value = true; } });
+            }
+        } else if (!isManualRebuy.value) { 
+            showRebuyModal.value = false; 
+        }
+
+        let newVisualTurn = -1;
+        if (normState.currentTurnSeat !== -1) newVisualTurn = (normState.currentTurnSeat - myLogicalSeatOffset.value + (gameState.maxPlayers || 6)) % (gameState.maxPlayers || 6);
+
+        if (deveTocarRedemoinho) {
+            if (gameState.phase === 'dealing') {
+                isDealing.value = true;
+                if (engine && typeof (engine as any).sweepBoard === 'function') {
+                    (engine as any).sweepBoard().then(() => {
+                        engine.startGameAutomatically(false).finally(() => { 
+                            isDealing.value = false; 
+                            flushPendingState(); 
+                        });
+                    });
+                }
+            } else if (gameState.phase === 'waiting') {
+                if (engine && typeof (engine as any).sweepBoard === 'function') {
+                    (engine as any).sweepBoard();
+                }
+            }
+        } 
+        else if (forceSnap) {
+            queuedAnimations.length = 0; 
+            isAnimating.value = false; 
+            isDealing.value = false;
+            
+            if (engine) {
+                engine.hardResetBoard();
+                gameState.players.forEach((p: any) => { p.uiCards = []; });
+                if (['dealing', 'betting', 'resolving'].includes(gameState.phase)) {
+                    engine.startGameAutomatically(true).then(() => {
+                        if (hasManuallyRevealedCards.value) {
+                            engine.revealHeroCards();
+                        } else {
+                            const hero = gameState.players.find((p: any) => p.isHero && p.isSeated);
+                            if (peekModeEnabled.value && hero && hero.status === 'playing' && heroCards.value && heroCards.value.length === 2) {
+                                showPeekerModal.value = true;
+                            }
+                        }
+                    }); 
+                }
+            }
+        } 
+        else {
+            if (gameState.phase === 'dealing' && oldPhase !== 'dealing') {
+                isDealing.value = true;
+                if (engine) {
+                    engine.startGameAutomatically(false).finally(() => { 
+                        isDealing.value = false; 
+                        flushPendingState(); 
+                    });
+                }
+            }
+        }
+
+        if (gameState.phase === 'betting' && newVisualTurn !== -1) {
+            if (newVisualTurn !== gameState.currentTurn || oldPhase !== 'betting' || forceSnap) {
+                gameState.currentTurn = newVisualTurn;
+                if (engine) {
+                    engine.startTimer(newVisualTurn, gameState.turnTimeLeft);
+                }
+            }
+        } else {
+            gameState.currentTurn = -1;
+            if (engine) engine.stopTimer();
+        }
+
+    } catch (err) {
+        console.error("Erro crítico no applyState:", err);
+    }
+}
+
+function syncTable(serverState: any) {
+    serverState._receivedAt = Date.now();
+    lastServerStateAt = Date.now();
+    const players = serverState.players || serverState.Players || [];
+    
+    const meInServer = players.find((p:any) => 
+        ((p.userId && safeCurrentUserId !== '' && String(p.userId).toLowerCase() === safeCurrentUserId) || 
+         (p.UserId && safeCurrentUserId !== '' && String(p.UserId).toLowerCase() === safeCurrentUserId)) 
+        && (p.isSeated || p.IsSeated)
+    );
+    
+    const meLocally = gameState.players.find(p => p.isHero && p.isSeated);
+    if (meInServer && !meLocally) {
+        forceNextSyncAsSnap = true;
+    }
+    
+    if (syncTimeoutId) clearTimeout(syncTimeoutId);
+    
+    pendingState = serverState;
+    
+    syncTimeoutId = setTimeout(() => {
+        if ((isDealing.value || isAnimating.value || queuedAnimations.length > 0 || isDiscarding3D.value) && !forceNextSyncAsSnap) { 
+            return; 
+        }
+        
+        const isSnap = forceNextSyncAsSnap;
+        forceNextSyncAsSnap = false;
+        const stateToApply = pendingState;
+        pendingState = null;
+        
+        if (stateToApply) applyState(stateToApply, isSnap);
+    }, 100);
+}
+
+function flushPendingState() {
+    if (pendingState && !isDealing.value && !isAnimating.value && queuedAnimations.length === 0 && !isDiscarding3D.value) {
+        const state = pendingState;
+        pendingState = null;
+        applyState(state, false); 
+    }
+}
+
+function invokeRebuy(amount: number) {
+    if (amount > 0) {
+        gameHub.rebuy(amount).then(() => {
+            showRebuyModal.value = false; fetchUserBalance(); 
+            if (gameState.phase !== 'waiting') appAlertMessage.value = "Recarga efetuada com sucesso!<br><br>Suas fichas estarão disponíveis na mesa na próxima rodada.";
+            else appAlertMessage.value = "Recarga efetuada com sucesso!<br><br>Suas fichas já foram adicionadas à mesa.";
+        }).catch(err => {
+            console.error("Erro no rebuy:", err);
+            appAlertMessage.value = `<span style="color: #ff4757; font-weight: bold;">Erro de Conexão:</span><br><br>Não foi possível concluir a recarga. Tente novamente.`;
+        });
+    }
+}
+
+function invokeStandUp() {
+    isWaitingToLeave.value = false; 
+    if (gameHub.setLeaveNextHand) gameHub.setLeaveNextHand(false); 
+    gameHub.standUp().then(() => {
+        showRebuyModal.value = false; fetchUserBalance(); sessionStartTime.value = null; 
+    }).catch(e => console.error(e));
+}
+
+function invokeSkipBet() {
+    hasManuallyRevealedCards.value = true;
+    
+    isAnimating.value = true; 
+
+    if (showPeekerModal.value && peekerRef.value) {
+        isDiscarding3D.value = true;
+        gameHub.skipBet(); 
+        peekerRef.value.discard().then(() => { 
+            isDiscarding3D.value = false; 
+            showPeekerModal.value = false; 
+            
+            isAnimating.value = false; 
+            processAnimationQueue(); 
+            flushPendingState();
+        });
+    } else {
+        showPeekerModal.value = false; 
+        gameHub.skipBet(); 
+        
+        setTimeout(() => {
+            isAnimating.value = false; 
+            processAnimationQueue();
+            flushPendingState();
+        }, 100);
+    }
+}
+
+function invokeConfirmBet(payload: number | string | { amount: number }) {
+    if (showPeekerModal.value) fecharPeekerERevelar(); else hasManuallyRevealedCards.value = true;
+    
+    isAnimating.value = true; 
+
+    let betValue = gameState.minBet;
+    if (typeof payload === 'number') betValue = payload;
+    else if (typeof payload === 'string' && !isNaN(Number(payload))) betValue = Number(payload);
+    else if (payload && typeof payload === 'object' && 'amount' in payload) betValue = Number(payload.amount);
+    
+    const hero = gameState.players.find(p => p.isHero);
+    const heroChips = hero ? hero.chips : 0;
+    const maxAllowed = Math.min(gameState.pot, heroChips);
+    
+    if (betValue > maxAllowed) betValue = maxAllowed;
+    gameHub.confirmBet(betValue);
+
+    setTimeout(() => {
+        isAnimating.value = false; 
+        processAnimationQueue();
+        flushPendingState();
+    }, 100);
+}
+
+function clicouMenu() { showMenuModal.value = true; }
+function clicouEstatisticas() { showStatsModal.value = true; }
+
+async function clicouVerMaos() { 
+    try {
+        const GAME_API_URL = import.meta.env.VITE_GAME_API_URL || 'http://localhost:5002';
+        const response = await fetch(`${GAME_API_URL}/api/handhistory/${tableId}`);
+        if (response.ok) {
+            const data = await response.json();
+            const safeData = data.filter((h: any) => {
+                if (sessionStartTime.value && new Date(h.playedAt) < new Date(sessionStartTime.value)) return false;
+                if (gameState.phase === 'waiting') return true; 
+                const p = gameState.players.find(x => x.userId === h.playerId);
+                if (p && p.serverCards && p.serverCards.length > 0) {
+                    const dbCards = (h.holeCards || []).join(',');
+                    const activeCards = p.serverCards.join(',');
+                    if (dbCards === activeCards) return false; 
+                }
+                return true;
+            });
+            sessionHandHistory.value = safeData.map((h: any) => {
+                const p = gameState.players.find(x => x.userId === h.playerId);
+                return { 
+                    id: h.id, 
+                    playerId: h.playerId, 
+                    playerName: h.playerName || (p ? p.name : ''), 
+                    playedAt: h.playedAt, 
+                    holeCards: h.holeCards || [], 
+                    communityCard: h.communityCard || '', 
+                    betAmount: h.betAmount 
+                };
+            });
+        }
+    } catch(e) {}
+    showHandHistoryModal.value = true; 
+}
+
+function handleMenuLeave() { 
+    showMenuModal.value = false; 
+    const hero = gameState.players.find(p => p.isHero && p.isSeated);
+    if (hero && hero.status === 'playing' && gameState.phase !== 'waiting') {
+        isWaitingToLeave.value = true; 
+        if (gameHub.setLeaveNextHand) gameHub.setLeaveNextHand(true); 
+    } else { invokeStandUp(); }
+}
+function cancelLeaveNextHand() { isWaitingToLeave.value = false; if (gameHub.setLeaveNextHand) gameHub.setLeaveNextHand(false); }
+function handleLobby() { showMenuModal.value = false; router.push('/lobby'); }
+function handleMenuRules() { showMenuModal.value = false; }
+function handleMenuSettings() { showMenuModal.value = false; }
+
+function handleToggleSound(enabled: boolean) { 
+    soundModeEnabled.value = enabled; localStorage.setItem('magic_sound_enabled', enabled ? '1' : '0');
+    if(engine && typeof (engine as any).setSoundEnabled === 'function') (engine as any).setSoundEnabled(enabled);
+}
+function handleTogglePeek(enabled: boolean) { 
+    peekModeEnabled.value = enabled; localStorage.setItem('magic_peek_enabled', enabled ? '1' : '0');
+}
+
+let hiddenTimestamp = 0;
+const handleVisibilityChange = async () => {
+    if (document.visibilityState === 'hidden') {
+        hiddenTimestamp = Date.now();
+    } else if (document.visibilityState === 'visible') {
+        hiddenTimestamp = 0; 
+        
+        // 🔥 DESCARTA QUALQUER ESTADO VELHO QUE FICOU PRESO NO BUFFER DO SIGNALR
+        pendingState = null;
+        forceNextSyncAsSnap = true; 
+        
+        // 🔥 FORÇA O PEDIDO DE UM ESTADO FRESQUINHO PRO SERVIDOR
+        if (gameHub && typeof gameHub.requestGameState === 'function') {
+            gameHub.requestGameState();
+        }
+        
+        if (engine) engine.updateDeckVisibility();
+    }
+};
+
+let watchdogIntervalId: ReturnType<typeof setInterval> | null = null;
+const WATCHDOG_CHECK_MS = 5000;
+const WATCHDOG_STALE_THRESHOLD_MS = 15000;
+
+function startConnectionWatchdog() {
+    watchdogIntervalId = setInterval(() => {
+        if (document.visibilityState !== 'visible') return; 
+        if (gameState.phase === 'waiting') return; 
+
+        const silentFor = Date.now() - lastServerStateAt;
+        if (silentFor > WATCHDOG_STALE_THRESHOLD_MS) {
+            console.warn(`[Watchdog] ${silentFor}ms sem receber estado do servidor com jogo ativo. Forçando resincronização.`);
+
+            queuedAnimations.length = 0;
+            isDealing.value = false;
+            isAnimating.value = false;
+            isDiscarding3D.value = false;
+            
+            // 🔥 Garante que o Watchdog também aniquila estados fantasmas antes de pedir o novo
+            pendingState = null;
+            forceNextSyncAsSnap = true;
+
+            if (gameHub && typeof gameHub.requestGameState === 'function') {
+                gameHub.requestGameState();
+            }
+
+            lastServerStateAt = Date.now();
+        }
+    }, WATCHDOG_CHECK_MS);
+}
+
+onMounted(async () => {
+    calculateScale(); window.addEventListener('resize', calculateScale); document.addEventListener('visibilitychange', handleVisibilityChange); 
+    
+    await fetchUserBalance();
+    
+    if (pixiContainer.value) {
+        try {
+            await engine.init(pixiContainer.value, GAME_WIDTH, GAME_HEIGHT, getAvatarUrl('default.webp'), deckImg, singleChipImg, tableImgAsset, potChipsImg);
+            engine.setPeekMode(peekModeEnabled.value); 
+            if(typeof (engine as any).setSoundEnabled === 'function') (engine as any).setSoundEnabled(soundModeEnabled.value);
+            
+            // GARANTIA: Atualiza os textos da mesa com as informações do gameState logo após inicializar a engine.
+            if (typeof (engine as any).updateTableTexts === 'function') {
+                (engine as any).updateTableTexts(gameState.tableName, gameState.tableMinBuyIn, gameState.minBet);
+            }
+        } catch(e) {}
+    }
+    
+    await gameHub.connect();
+    startConnectionWatchdog();
+    setTimeout(() => { isAppLoading.value = false; }, 500);
+});
+
+onUnmounted(() => {
+    if (peekTimeoutId) clearTimeout(peekTimeoutId);
+    if (watchdogIntervalId) clearInterval(watchdogIntervalId);
+    window.removeEventListener('resize', calculateScale); document.removeEventListener('visibilitychange', handleVisibilityChange); 
+    gameHub.disconnect(); engine.destroy();
+});
+</script>
+
+<style scoped>
+.main-wrapper { 
+    position: relative; 
+    width: 100vw; 
+    min-height: 100vh; 
+    min-height: 100dvh; 
+    background-color: #05080e; 
+    box-sizing: border-box; 
+    background-image: radial-gradient(circle at 50% 50%, #151e32 0%, #05080e 100%); 
+    overflow: hidden; 
+}
+
+.game-container { 
+    position: absolute; 
+    top: 50%; 
+    left: 50%; 
+    width: 430px; 
+    height: 900px; 
+    transform-origin: center center; 
+    border-radius: 20px; 
+    overflow: hidden; 
+    border: none; 
+    background-image: url('../assets/imagens/Tablebgmain.png');
+    background-size: 100% 100%; 
+    background-position: center;
+    background-color: #111; 
+    box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+}
+
+.table-content-fader { width: 100%; height: 100%; opacity: 0; transform: scale(0.95); transition: opacity 1s ease-out, transform 1.2s cubic-bezier(0.165, 0.84, 0.44, 1); pointer-events: none; }
+.fade-in-content { opacity: 1; transform: scale(1); pointer-events: auto; }
+
+.waitlist-widget {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    z-index: 400;
+    pointer-events: auto;
+    gap: 10px;
+}
+
+.waitlist-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.waitlist-info {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.waitlist-title {
+    font-size: 14px;
+    font-weight: 900;
+    color: #fff;
+    text-transform: uppercase;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+}
+
+.waitlist-subtitle {
+    font-size: 11px;
+    color: #a8b2c1;
+    font-weight: bold;
+    text-transform: uppercase;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
+
+.chevron {
+    width: 20px; 
+    height: 20px;
+    color: #00f3ff;
+    filter: drop-shadow(0 0 2px #00f3ff);
+    transition: transform 0.3s;
+}
+
+.chevron.open {
+    transform: rotate(180deg);
+}
+
+.waitlist-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 5px;
+    padding-left: 8px;
+    border-left: 2px solid rgba(0, 243, 255, 0.5);
+    background: rgba(10, 15, 25, 0.3); 
+    backdrop-filter: blur(2px);
+    padding: 10px 15px;
+    border-radius: 0 8px 8px 0;
+}
+
+.waitlist-item {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 800;
+    text-shadow: 0 1px 3px rgba(0,0,0,1);
+}
+
+.wl-pos { color: #f1c40f; }
+.wl-name { color: #fff; }
+
+.btn-wl-action {
+    background: transparent;
+    border: none;
+    font-weight: 900;
+    font-size: 13px;
+    cursor: pointer;
+    padding: 0;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+    transition: transform 0.2s;
+}
+
+.btn-wl-action.join { color: #3ce48a; }
+.btn-wl-action.leave { color: #ff4757; }
+.btn-wl-action:active { transform: scale(0.95); }
+
+.fade-slide-enter-active, .fade-slide-leave-active { transition: all 0.3s ease; }
+.fade-slide-enter-from, .fade-slide-leave-to { opacity: 0; transform: translateY(10px); }
+
+.fade-peeker-enter-active, .fade-peeker-leave-active { transition: opacity 0.6s ease-in-out; }
+.fade-peeker-enter-from, .fade-peeker-leave-to { opacity: 0; }
+.peeker-safe-hide { transition: opacity 0.3s ease; }
+.peeker-hidden { opacity: 0 !important; pointer-events: none !important; }
+
+.pixi-canvas { 
+    position: absolute; 
+    top: 0; 
+    left: 0; 
+    width: 430px; 
+    height: 900px; 
+    z-index: 2; 
+    pointer-events: auto !important; 
+}
+
+.table-neon-aura { 
+    display: none; 
+}
+
+.ui-layer { position: absolute; top: 0; left: 0; width: 430px; height: 900px; z-index: 300; pointer-events: none !important; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; padding: 40px 0 15px 0; box-sizing: border-box; }
+.ui-layer > * { pointer-events: auto !important; }
+
+.controls-wrapper { width: 100%; margin-bottom: 16px; display: flex; justify-content: center; }
+
+.hud-btn { position: absolute; width: 46px; height: 46px; background: linear-gradient(135deg, rgba(20, 28, 45, 0.85), rgba(10, 15, 25, 0.95)); border: 1px solid rgba(0, 243, 255, 0.3); border-radius: 12px; display: flex; justify-content: center; align-items: center; cursor: pointer; z-index: 50; box-shadow: 0 4px 15px rgba(0,0,0,0.6), inset 0 0 10px rgba(0, 243, 255, 0.1); backdrop-filter: blur(8px); transition: all 0.2s ease-in-out; padding: 0; outline: none; pointer-events: auto !important; }
+.hud-btn:hover, .hud-btn:active { transform: scale(1.08) translateY(-2px); border-color: rgba(0, 243, 255, 0.8); box-shadow: 0 6px 20px rgba(0, 243, 255, 0.4), inset 0 0 15px rgba(0, 243, 255, 0.3); }
+.hud-btn svg { width: 22px; height: 22px; stroke: #00f3ff; filter: drop-shadow(0 0 4px rgba(0, 243, 255, 0.8)); }
+
+.hud-top-left { top: 20px; left: 20px; }
+.hud-top-right { top: 20px; right: 20px; }
+.hud-bottom-left { bottom: 20px; left: 20px; }
+
+.table-id-footer { position: absolute; bottom: 8px; left: 0; width: 100%; text-align: center; color: rgba(255, 255, 255, 0.3); font-family: Arial, sans-serif; font-size: 11px; white-space: nowrap; pointer-events: none; z-index: 50; }
+
+.leave-warning {
+    position: absolute; top: 26px; left: 50%; transform: translateX(-50%); background: rgba(231, 76, 60, 0.95);
+    border: 1px solid #ff7979; border-radius: 20px; padding: 6px 12px; display: flex; align-items: center; gap: 8px;
+    box-shadow: 0 4px 15px rgba(231, 76, 60, 0.4); z-index: 500; animation: slideDownFade 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); width: max-content; max-width: 250px;
+}
+.leave-warning span { color: white; font-family: Arial, sans-serif; font-size: 11px; font-weight: bold; white-space: nowrap; }
+.leave-warning button { background: white; color: #e74c3c; border: none; border-radius: 8px; padding: 4px 8px; font-size: 9px; font-weight: 900; cursor: pointer; text-transform: uppercase; transition: transform 0.1s; }
+.leave-warning button:active { transform: scale(0.9); }
+
+@keyframes slideDownFade { 0% { transform: translate(-50%, -20px); opacity: 0; } 100% { transform: translate(-50%, 0); opacity: 1; } }
+
+.fade-alert-enter-active, .fade-alert-leave-active { transition: opacity 0.3s ease; }
+.fade-alert-enter-from, .fade-alert-leave-to { opacity: 0; }
+
+.custom-alert-overlay { position: absolute; top: 0; left: 0; width: 430px; height: 900px; background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(5px); z-index: 99999; display: flex; justify-content: center; align-items: center; pointer-events: auto; }
+.custom-alert-box { background: linear-gradient(145deg, #1a2639, #111827); border: 2px solid #3ce48a; border-radius: 16px; padding: 24px; width: 80%; max-width: 320px; text-align: center; color: white; box-shadow: 0 10px 40px rgba(0,0,0,0.8), inset 0 0 20px rgba(60, 228, 138, 0.1); animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+
+@keyframes popIn { 0% { transform: scale(0.8); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+
+.alert-icon { width: 50px; height: 50px; margin: 0 auto 15px auto; background: rgba(60, 228, 138, 0.1); border-radius: 50%; display: flex; justify-content: center; align-items: center; }
+.alert-icon svg { width: 28px; height: 28px; }
+.custom-alert-box h3 { margin: 0 0 10px 0; color: #3ce48a; text-transform: uppercase; font-size: 18px; letter-spacing: 1px; }
+.custom-alert-box p { font-size: 13px; color: #8da1bc; margin-bottom: 25px; line-height: 1.4; }
+.btn-confirm-full { background: #3ce48a; color: #000; padding: 12px 15px; border-radius: 8px; font-weight: bold; cursor: pointer; border: none; width: 100%; text-transform: uppercase; font-size: 13px; transition: transform 0.1s ease; }
+.btn-confirm-full:active { transform: scale(0.95); }
+</style>

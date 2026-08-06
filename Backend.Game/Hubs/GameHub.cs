@@ -121,8 +121,6 @@ public class GameHub : Hub
 
             if (seated)
             {
-                // O GameManager já avisa o "PlayerSatDown" e já faz o "BroadcastTableStateAsync". 
-                // Nossa única obrigação no Hub agora é atualizar o Lobby principal!
                 int count = _gameManager.GetSeatedPlayerCount(tableId);
                 await Clients.All.SendAsync("LobbyTableUpdated", tableId, count);
             }
@@ -173,7 +171,9 @@ public class GameHub : Hub
             if (_gameManager.SkipTurn(tableId, Context.ConnectionId, out int seat, out bool roundEnded, localUserId))
             {
                 await Clients.Group(tableId).SendAsync("PlayerSkipped", seat);
-                await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, 2000);
+                // 🔥 Reduzido de 2000ms para 1000ms: essa pausa existe só pra dar tempo
+                // da animação de descarte da carta rodar antes de liberar a próxima vez.
+                await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, 1000);
             }
             else
             {
@@ -194,9 +194,11 @@ public class GameHub : Hub
             {
                 await Clients.Group(tableId).SendAsync("PlayerBetted", seat, amount, isWin, potBroken, playedCards, centerCardRevealed);
 
-                int delay = 10000;
-                if (isWin) delay = 12000;
-                if (potBroken) delay += 2500;
+                // 🔥 Reduzido pela metade (era 10000/12000/+2500) pra testar um tempo
+                // de exibição de resultado mais curto.
+                int delay = 5000;
+                if (isWin) delay = 6000;
+                if (potBroken) delay += 1250;
 
                 await _gameManager.ProcessNextRoundLoop(tableId, roundEnded, delay);
             }
@@ -221,12 +223,11 @@ public class GameHub : Hub
 
             bool stoodUp = await _gameManager.StandUp(tableId, Context.ConnectionId);
 
+            // Reforço: Transmite o estado da mesa mesmo se o retorno foi falso (ex: jogador na fila ou apenas espectador)
+            await _gameManager.BroadcastTableStateAsync(tableId);
+
             if (stoodUp)
             {
-                // Garante que o estado mais recente (mesmo que seja só sinalizando "LeaveNextHand")
-                // seja refletido na mesa imediatamente.
-                await _gameManager.BroadcastTableStateAsync(tableId);
-
                 int count = _gameManager.GetSeatedPlayerCount(tableId);
                 await Clients.All.SendAsync("LobbyTableUpdated", tableId, count);
             }
@@ -234,7 +235,14 @@ public class GameHub : Hub
         catch (Exception ex)
         {
             Console.WriteLine($"Erro no StandUp: {ex.Message}");
+            await Clients.Caller.SendAsync("ReceiveError", "Ocorreu um atraso de comunicação. Tente novamente.");
         }
+    }
+
+    // 🔥 NOVO MÉTODO: Responde ao chamado do Frontend quando a tela acorda do modo minimizado
+    public async Task RequestGameState(string tableId)
+    {
+        await _gameManager.BroadcastTableStateAsync(tableId);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)

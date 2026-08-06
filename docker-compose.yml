@@ -118,18 +118,42 @@ services:
     networks:
       - magic_network
 
-  # ✅ NOVO MICROSSERVIÇO DE SUPORTE WHATSAPP (NODE.JS)
-  whatsapp_bot:
+  # ✅ WORKER ISOLADO DE HISTÓRICO DE MÃOS (.NET)
+  # Desacoplado fisicamente do Backend.Game: se o banco da DigitalOcean
+  # engasgar, esse container sofre sozinho — as mesas em tempo real (game,
+  # cacheta) continuam rodando normalmente, já que só se comunicam com ele
+  # via fila do RabbitMQ (fire-and-forget), nunca esperando resposta.
+  handhistory:
     build:
-      context: ./Backend.WhatsApp
-      dockerfile: Dockerfile
-    container_name: magic_whatsapp
-    restart: unless-stopped
-    volumes:
-      # Esse volume salva a sessão do WhatsApp! Assim ele não pede QR Code toda vez que reiniciar
-      - ./Backend.WhatsApp/.wwebjs_auth:/app/.wwebjs_auth
+      context: .
+      dockerfile: Backend.HandHistoryWorker/Dockerfile
+    container_name: magic_handhistory
+    env_file:
+      - .env
+    environment:
+      ConnectionStrings__DefaultConnection: "${DB_CONN_GAME}"
+      RabbitMq__Host: "${RABBITMQ_HOST}"
+      RabbitMq__Username: "${RABBITMQ_USER}"
+      RabbitMq__Password: "${RABBITMQ_PASS}"
+      DOTNET_ENVIRONMENT: "Development"
+    restart: always
+    depends_on:
+      - rabbitmq
     networks:
       - magic_network
+
+  # ✅ NOVO MICROSSERVIÇO DE SUPORTE WHATSAPP (NODE.JS)
+  # whatsapp_bot:
+  #   build:
+  #     context: ./Backend.WhatsApp
+  #     dockerfile: Dockerfile
+  #   container_name: magic_whatsapp
+  #   restart: unless-stopped
+  #   volumes:
+  #     # Esse volume salva a sessão do WhatsApp! Assim ele não pede QR Code toda vez que reiniciar
+  #     - ./Backend.WhatsApp/.wwebjs_auth:/app/.wwebjs_auth
+  #   networks:
+  #     - magic_network
 
 networks:
   magic_network:

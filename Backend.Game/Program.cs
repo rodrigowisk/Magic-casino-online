@@ -7,40 +7,55 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 
+// 🔥 CORREÇÃO DE PERFORMANCE (ANTI-LAG) 🔥
+// Força o servidor a manter 100 threads acordadas no mínimo. 
+// Isso impede que o SignalR congele quando o banco de dados da DigitalOcean fica lento.
+ThreadPool.SetMinThreads(100, 100);
+
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Adicionar suporte a Controllers, Swagger e SignalR
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-builder.Services.AddSignalR(); // O MOTOR EM TEMPO REAL ESTÁ LIGADO AQUI!
+builder.Services.AddSignalR(); 
 builder.Services.AddHostedService<BotManagerService>();
 
-// 2. Adicionar o Gerenciador de Mesas (Singleton: mantém as mesas ativas na memória do servidor)
 builder.Services.AddSingleton<GameManager>();
-
-// ---> INTEGRAÇÃO RABBITMQ (Adicionado aqui) <---
 builder.Services.AddSingleton<Backend.Game.Messaging.IRabbitMqService, Backend.Game.Messaging.RabbitMqService>();
-builder.Services.AddHostedService<Backend.Game.Messaging.HandHistoryWorker>();
-builder.Services.AddHostedService<Backend.Game.Workers.TableCleanupWorker>();
+
+builder.Services.AddHostedService<Backend.Game.Workers.TableExpirationWorker>();
 builder.Services.AddHostedService<Backend.Game.Workers.CrashRecoveryWorker>();
 
-// ---> INTEGRAÇÃO WALLET SERVICE (CARTEIRA) <---
-// Registra o WalletService e configura o endereço base da API do Identity
-// O Docker usará a variável de ambiente IdentityApiUrl, ou usará localhost por padrão em dev.
 builder.Services.AddHttpClient<IWalletService, WalletService>(client =>
 {
     client.BaseAddress = new Uri(builder.Configuration["IdentityApiUrl"] ?? "http://localhost:5001");
 });
 
-// 3. Configurar o Banco de Dados PostgreSQL
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
     ?? "Host=db;Database=magic_game_db;Username=postgres;Password=suasenha";
 
-builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(connectionString));
+// 🔥 O SEGREDO DA ESTABILIDADE COM A DIGITALOCEAN 🔥
+// Retiramos o timeout mortal de 5 segundos. Ajustamos o Pool para aguentar o tráfego 
+// do SignalR e não desconectar jogadores à toa.
+var npgsqlBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString)
+{
+    Timeout = 30,           
+    CommandTimeout = 30,    
+    MaxPoolSize = 200,      
+    MinPoolSize = 5,        
+    ConnectionIdleLifetime = 300
+};
+connectionString = npgsqlBuilder.ConnectionString;
 
-// 4. Configurar a Política de CORS (AGORA COM O SEU DOMÍNIO LIBERADO E MOBILE)
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseNpgsql(connectionString, npgsqlOptionsAction: npgsqlOptions =>
+    {
+        npgsqlOptions.EnableRetryOnFailure(
+            maxRetryCount: 5, 
+            maxRetryDelay: TimeSpan.FromSeconds(5), 
+            errorCodesToAdd: null);
+    }));
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowVueFrontend", policy =>
@@ -50,17 +65,16 @@ builder.Services.AddCors(options =>
                 "http://localhost:5174",
                 "https://magic-casino.online",
                 "https://www.magic-casino.online",
-                "http://localhost",       // 👉 Android Capacitor (versões antigas)
-                "https://localhost",      // 👉 Android Capacitor (versões novas)
-                "capacitor://localhost"   // 👉 iOS Capacitor
+                "http://localhost",       
+                "https://localhost",      
+                "capacitor://localhost"   
             )
               .AllowAnyHeader()
               .AllowAnyMethod()
-              .AllowCredentials(); // Extremamente importante para o SignalR funcionar!
+              .AllowCredentials(); 
     });
 });
 
-// 5. Configurar Autenticação JWT com suporte a WebSockets (SignalR)
 var jwtKey = builder.Configuration["Jwt:Key"] ?? "UmaChaveSuperSecretaMuitoLongaParaOJWT123!";
 var keyBytes = Encoding.ASCII.GetBytes(jwtKey);
 
@@ -77,7 +91,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateAudience = false
         };
 
-        // EVENTO ESSENCIAL PARA O SIGNALR LER O TOKEN JWT NA URL
         options.Events = new JwtBearerEvents
         {
             OnMessageReceived = context =>
@@ -101,13 +114,11 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-//app.UseHttpsRedirection();
 app.UseCors("AllowVueFrontend");
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
-// 6. Mapear o túnel WebSocket do SignalR
 app.MapHub<GameHub>("/hubs/game");
 
 app.Run();

@@ -2,6 +2,7 @@
 using Backend.Game.DTOs;
 using Backend.Game.Models;
 using Backend.Game.Services;
+using Backend.Game.Messaging;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -16,41 +17,49 @@ public class TableController : ControllerBase
 {
     private readonly AppDbContext _context;
     private readonly GameManager _gameManager;
+    private readonly IRabbitMqService _rabbitMqService;
 
-    public TableController(AppDbContext context, GameManager gameManager)
+    public TableController(AppDbContext context, GameManager gameManager, IRabbitMqService rabbitMqService)
     {
         _context = context;
         _gameManager = gameManager;
+        _rabbitMqService = rabbitMqService;
     }
 
-    [HttpGet]
-    public async Task<IActionResult> GetActiveTables()
+[HttpGet]
+public async Task<IActionResult> GetActiveTables()
+{
+    var now = DateTime.UtcNow;
+
+    // 1. Busca APENAS as mesas ativas e do tipo meinho (O banco usa índices aqui, é instantâneo)
+    var activeTablesDb = await _context.GameTables
+        .Where(t => t.IsActive && t.GameType == "meinho")
+        .OrderByDescending(t => t.CreatedAt)
+        .ToListAsync();
+
+    // 2. Filtra o tempo de expiração na memória (C#), aliviando o banco
+    var tablesDb = activeTablesDb
+        .Where(t => t.CreatedAt.AddHours(t.DurationHours) > now)
+        .ToList();
+
+    var tables = tablesDb.Select(t => new TableResponseDto
     {
-        var now = DateTime.UtcNow;
+        Id = t.Id,
+        Name = t.Name,
+        Ante = t.Ante,
+        MaxPlayers = t.MaxPlayers,
+        CurrentPlayers = _gameManager.GetSeatedPlayerCount(t.Id.ToString()),
+        Rake = t.Rake,
+        MinBuyIn = t.MinBuyIn,
+        DurationHours = t.DurationHours,
+        GameType = t.GameType,
+        HasPassword = !string.IsNullOrEmpty(t.PasswordHash),
+        CoverImage = t.CoverImage,
+        IsDemo = t.IsDemo
+    }).ToList();
 
-        var tablesDb = await _context.GameTables
-            .Where(t => t.IsActive && t.CreatedAt.AddHours(t.DurationHours) > now && t.GameType == "meinho")
-            .OrderByDescending(t => t.CreatedAt)
-            .ToListAsync();
-
-        var tables = tablesDb.Select(t => new TableResponseDto
-        {
-            Id = t.Id,
-            Name = t.Name,
-            Ante = t.Ante,
-            MaxPlayers = t.MaxPlayers,
-            CurrentPlayers = _gameManager.GetSeatedPlayerCount(t.Id.ToString()),
-            Rake = t.Rake,
-            MinBuyIn = t.MinBuyIn,
-            DurationHours = t.DurationHours,
-            GameType = t.GameType,
-            HasPassword = !string.IsNullOrEmpty(t.PasswordHash),
-            CoverImage = t.CoverImage,
-            IsDemo = t.IsDemo
-        }).ToList();
-
-        return Ok(tables);
-    }
+    return Ok(tables);
+}
 
     [HttpPost]
     public async Task<IActionResult> CreateTable([FromBody] CreateTableDto request)
@@ -83,6 +92,9 @@ public class TableController : ControllerBase
         _context.GameTables.Add(newTable);
         await _context.SaveChangesAsync();
 
+        // Agenda o encerramento da mesa no RabbitMQ
+        await _rabbitMqService.PublishTableExpirationAsync(newTable.Id, newTable.DurationHours);
+
         return Ok(new { message = "Mesa criada com sucesso!", tableId = newTable.Id });
     }
 
@@ -107,10 +119,6 @@ public class TableController : ControllerBase
 
         return Ok(new { success = true });
     }
-
-    // ====================================================================
-    // 👇 ROTAS DE RELATÓRIO 👇
-    // ====================================================================
 
     [HttpGet("report/dashboard")]
     public async Task<IActionResult> GetDashboardSummary()
@@ -230,9 +238,6 @@ public class TableController : ControllerBase
         }
     }
 
-    // ====================================================================
-    // 👇 NOVA ROTA: BUSCA O RAKE TOTAL DE TODOS OS JOGADORES (PARA O AGENTE) 👇
-    // ====================================================================
     [HttpGet("report/all-players-rake")]
     public async Task<IActionResult> GetAllPlayersRake()
     {

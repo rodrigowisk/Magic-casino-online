@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Backend.Cacheta")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+34886e36ad7ccd2d890a8acdbb7920fea2636d9f")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ccb095702b9b3690e44870404f6103693b4ec088")]
 [assembly: System.Reflection.AssemblyProductAttribute("Backend.Cacheta")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Backend.Cacheta")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
